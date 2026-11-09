@@ -2,17 +2,19 @@
 eval_geometry_lidar.py
 Geometry evaluation of the pipeline's 3D buildings (+ terrain) against airborne LiDAR.
 
-The script builds the buildings for a bounding box with the pipeline's own code, so it
-evaluates exactly what `src/main.py --terrain` puts in the .glb:
-  OSM footprints     common.providers.OSMClient (same query as the fetch stage)
-  heights            common.MeshUtils.get_base_and_height (height tag, else
-                     building:levels x 3.5 m, else 3 storeys = 10.5 m)
-  terrain            terrain.build_terrain (Terrarium tiles), when not --no-terrain
-  placement          mesh_builder.extrude.ground_under: roof = highest ground under the
-                     footprint + height, walls down to the lowest ground - EMBED_M
-It then compares every building with LiDAR points (USGS 3DEP, fetched automatically).
-No Mapillary, pose alignment or texturing is run. Building heights always come from OSM;
-LiDAR is used only as the reference.
+It evaluates the model the pipeline wrote: run the pipeline (web app or src/main.py),
+then point this script at the output. Nothing in the pipeline changes.
+  which      OSM (fetched again for the model's bounding box, as the fetch stage does)
+             splits the mesh into buildings and gives each its id, name and height tags
+  geometry   from the .glb: roof = highest horizontal face inside the footprint, base =
+             lowest one, model terrain = the .glb's ground mesh
+  where      the .glb is centred on the model, so the script works out where it sits in
+             UTM from the job's bounding box (job.json) and the terrain grid (with
+             terrain) or the OSM outlines (flat model)
+OSM buildings with nothing in the mesh are reported as "not_in_mesh" (e.g. ones mapped as
+relations, which extrude.py does not build yet). A model built with terrain gets every
+metric; a flat one only the height. LiDAR (USGS 3DEP, fetched automatically) is only the
+reference.
 
 How results are judged (draft requirement QR-06)
   QR-06a  terrain accuracy  PASS/FAIL. Terrain data is complete and measured. Share of buildings whose
@@ -27,7 +29,9 @@ How results are judged (draft requirement QR-06)
           high = explicit `height` tag, medium = `building:levels` only, low = no tag (default)
 
 Metrics (per building, in meters, signed = model - LiDAR, + means model too high/tall)
-  M1  height error      OSM height - LiDAR height
+  M1  height error      model height - LiDAR height. Model height = mesh roof - highest
+                        model ground under the footprint (the height extrude.py used:
+                        the OSM tag, else levels x 3.5 m, else 10.5 m)
                         LiDAR height = roof top - lowest ground at the footprint edge
                         (same definition as the OSM `height` tag: lowest ground contact
                         to top of roof). No terrain involved.
@@ -56,21 +60,22 @@ LiDAR reference per building
 
 Run (from the repo root, in the project environment)
   poetry run pip install "laspy[lazrs]"            # once: reads the LiDAR tiles
-  poetry run python scripts/eval/eval_geometry_lidar.py --bbox -83.71978 42.29025 -83.71205 42.29422
-  # WEST SOUTH EAST NORTH in degrees, the same order as src/main.py --bbox
-  poetry run python scripts/eval/eval_geometry_lidar.py --from-dir output/geometry_eval   # rerun, no refetch
+  poetry run python scripts/eval/eval_geometry_lidar.py --latest     # newest web app job
+  poetry run python scripts/eval/eval_geometry_lidar.py output/jobs/<id>
+  poetry run python scripts/eval/eval_geometry_lidar.py model.glb --bbox W S E N
+                                      # a .glb from src/main.py: give its --bbox
+  poetry run python scripts/eval/eval_geometry_lidar.py --from-dir output/jobs/<id>/geometry_eval
+                                      # evaluate again without reading the .glb or OSM
   ... --laz tile1.laz tile2.laz       local LiDAR instead of USGS
   ... --ept https://.../ept.json      a specific USGS collection
   ... --height-baseline 0.34          compare the height share with an earlier run
-  ... --no-terrain                    flat ground, as src/main.py without --terrain
-                                      (heights only; terrain and roof elevation skipped)
 
-Outputs (in output/geometry_eval/ unless --out; output/ is git-ignored)
+Outputs (in geometry_eval/ next to the .glb, e.g. output/jobs/<id>/geometry_eval/)
   summary.md (start here), summary.json, per_building.csv,
   per_building_errors.geojson (open in QGIS), 01_scorecard.png,
   02_height_error_by_source.png, 03_height_scatter.png, 04_placement_vs_slope.png,
-  05_height_error_map.png, and the inputs it built: buildings_footprints_utm.geojson,
-  terrain_grid.npz (used by --from-dir)
+  05_height_error_map.png, and what it read from the mesh and OSM:
+  buildings_footprints_utm.geojson, terrain_grid.npz, osm_buildings.json
 """
 
 import argparse
@@ -149,15 +154,133 @@ def load_terrain(path):
     return lambda xs, ys: interp(np.column_stack([ys, xs]))
 
 
-def build_from_pipeline(bbox, use_terrain, out):
+def outline_parts(element, to_xy, way_ids=()):
     """
-    The buildings and terrain the pipeline makes for `bbox` (WEST, SOUTH, EAST, NORTH),
-    using its own code (fetch stage query, MeshUtils heights, terrain stage, extrude.py
-    placement). Writes buildings_footprints_utm.geojson and terrain_grid.npz to `out`
-    (read back by --from-dir) and returns (feats, utm_crs, terrain_fn, embed_m).
+    Footprint polygons (UTM) of an OSM building from an Overpass "out geom" element:
+      way       its outline
+      relation  a multipolygon (e.g. Duderstadt Center): the outer members' rings minus
+                the inner ones (courtyards). A ring may be split over several member
+                ways, so the members are joined first. Outer members that are also
+                fetched as building ways themselves (`way_ids`) are skipped, so a
+                building is not counted twice.
+    Returns a list of Polygons (one per separate part); empty when there is no usable
+    outline.
+    """
+    from shapely.geometry import LineString, Polygon
+    from shapely.ops import polygonize, unary_union
+
+    if element.get("type") == "way":
+        geom = element.get("geometry") or []
+        if len(geom) < 3:
+            return []
+        shape_ = Polygon(to_xy(geom))
+    elif element.get("type") == "relation":
+        lines = {"outer": [], "inner": []}
+        for m in element.get("members", []):
+            role = "inner" if m.get("role") == "inner" else "outer"
+            if m.get("type") != "way" or len(m.get("geometry") or []) < 2:
+                continue
+            if role == "outer" and m.get("ref") in way_ids:
+                continue
+            lines[role].append(LineString(to_xy(m["geometry"])))
+        if not lines["outer"]:
+            return []
+        outer = unary_union(list(polygonize(unary_union(lines["outer"]))))
+        inner = (
+            unary_union(list(polygonize(unary_union(lines["inner"]))))
+            if lines["inner"]
+            else None
+        )
+        shape_ = outer.difference(inner) if inner is not None else outer
+    else:
+        return []
+    if not shape_.is_valid:
+        shape_ = shape_.buffer(0)
+    parts = list(getattr(shape_, "geoms", [shape_]))
+    return [g for g in parts if g.geom_type == "Polygon" and g.area > 1.0]
+
+
+def _glb_parts(path):
+    """{"buildings": Trimesh, "terrain": Trimesh} from the .glb, node transforms applied.
+    The ground is the mesh named "terrain" (export_mesh); every other mesh is buildings,
+    joined into one (a textured model can load as several pieces, e.g. geometry_0, ...)."""
+    import trimesh
+
+    scene = trimesh.load(path, force="scene")
+    pieces = {"buildings": [], "terrain": []}
+    names = []
+    for node in scene.graph.nodes_geometry:
+        T, gname = scene.graph[node]
+        m = scene.geometry[gname]
+        if not isinstance(m, trimesh.Trimesh) or not len(m.faces):
+            continue  # points, lines or empty meshes: not part of the model's geometry
+        m = trimesh.Trimesh(vertices=m.vertices, faces=m.faces, process=False)
+        m.apply_transform(T)
+        kind = "terrain" if "terrain" in f"{node} {gname}".lower() else "buildings"
+        pieces[kind].append(m)
+        names.append(f"{gname} ({kind}, {len(m.faces):,} faces)")
+    print(f"[input] {Path(path).name}: " + ", ".join(names))
+    if not pieces["buildings"]:
+        sys.exit(f"[input] {path}: no building mesh")
+    return {k: trimesh.util.concatenate(v) for k, v in pieces.items() if v}
+
+
+def _terrain_from_mesh(xyz, z_datum):
+    """The terrain stage's grid (Terrain) back from the .glb's ground mesh vertices."""
+    from terrain import Terrain
+
+    xyz = np.unique(np.round(xyz, 3), axis=0)  # one vertex per grid point
+    xs = np.unique(np.round(xyz[:, 0], 2))
+    ys = np.unique(np.round(xyz[:, 1], 2))
+    if len(xs) * len(ys) != len(xyz):
+        sys.exit("[input] the .glb's terrain is not a regular grid")
+    order = np.lexsort((xyz[:, 0], xyz[:, 1]))  # row by row, as Terrain.to_mesh
+    z = xyz[order, 2].reshape(len(ys), len(xs)) - z_datum
+    return Terrain(xs=xs, ys=ys, z=z, z_datum=z_datum)
+
+
+def find_model(path=None, latest=False, jobs_dir="output/jobs"):
+    """The model .glb: `path` is a .glb or a folder holding model.glb (a web app job,
+    output/jobs/<id>/); with `latest`, the newest output/jobs/*/model.glb."""
+    if latest:
+        found = sorted(
+            Path(jobs_dir).glob("*/model.glb"), key=lambda q: q.stat().st_mtime
+        )
+        if not found:
+            sys.exit(f"[input] no {jobs_dir}/*/model.glb: run the pipeline first")
+        return found[-1]
+    q = Path(path)
+    q = q / "model.glb" if q.is_dir() else q
+    if not q.exists():
+        sys.exit(f"[input] {q} not found")
+    return q
+
+
+def build_from_glb(glb, out, bbox=None, osm_cache=True):
+    """
+    The buildings and terrain of a pipeline .glb, in UTM metres and absolute elevation,
+    one footprint per OSM building. The geometry comes from the mesh; OSM (fetched again
+    for the model's bounding box, as the fetch stage does) gives each building its
+    outline, id, name and height tags:
+      roof  = highest horizontal face of the mesh inside the footprint
+      base  = lowest horizontal face inside the footprint
+      height (above the highest ground, as extrude.py) = roof - highest ground under
+             the footprint (model terrain); without terrain: roof (ground = 0)
+    An OSM building with nothing in the mesh is "not_in_mesh" (e.g. one mapped as a
+    relation, which extrude.py does not build yet).
+
+    The bounding box comes from the job.json next to the .glb (web app jobs) or `bbox`.
+    export_mesh moved the model from UTM by the box centre and then by the centre of its
+    bounds, and with terrain measured heights from the terrain's lowest point; the .glb
+    keeps none of these, so they are worked out again: with terrain, from the terrain
+    stage's grid for the same box (same elevation tiles, same grid); without, from the
+    OSM outlines the mesh was extruded from.
+
+    Writes buildings_footprints_utm.geojson, terrain_grid.npz and osm_buildings.json to
+    `out` (read back by --from-dir) and returns (feats, utm_crs, terrain_fn, embed_m).
     """
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
 
     from common.constants import BoundingBox
     from common.MeshUtils import (
@@ -169,55 +292,155 @@ def build_from_pipeline(bbox, use_terrain, out):
     from common.providers import OSM_MAP_FEATURES, OSMClient
     from mesh_builder.extrude import EMBED_M as embed_m
     from mesh_builder.extrude import ground_under
-    from terrain import build_terrain
 
+    glb = Path(glb)
+    job = glb.parent / "job.json"
+    if bbox is None and job.exists():
+        b = json.loads(job.read_text())["bbox"]
+        bbox = (b["west"], b["south"], b["east"], b["north"])
+    if bbox is None:
+        sys.exit(
+            f"[input] no job.json next to {glb.name}: pass the --bbox the model was "
+            "built with (WEST SOUTH EAST NORTH)"
+        )
     box_ = BoundingBox.from_list(list(bbox))
     lon0, lat0 = (box_.min_lon + box_.max_lon) / 2, (box_.min_lat + box_.max_lat) / 2
-    epsg = _get_utm_transformer(lon0, lat0).target_crs.to_epsg()
-    print(f"[input] OSM buildings for {box_.to_str()} (as the pipeline's fetch stage)")
-    data = OSMClient().fetch(box_, [OSM_MAP_FEATURES.BUILDING])
-    terrain = build_terrain(box_) if use_terrain else None
+    to_utm_tf = _get_utm_transformer(lon0, lat0)
+    epsg = to_utm_tf.target_crs.to_epsg()
+    ox, oy = to_utm_tf.transform(lon0, lat0)
+    parts = _glb_parts(glb)
 
-    feats, skipped = [], 0
-    for el in data.get("elements", []):
-        geom = el.get("geometry")
-        if not geom or len(geom) < 3:  # left out of the mesh by extrude.py too
-            skipped += 1
-            continue
-        corners = get_corners(el, box_)
-        poly = Polygon(corners)
-        if not poly.is_valid:
-            poly = poly.buffer(0)
-            if poly.geom_type == "MultiPolygon":
-                poly = max(poly.geoms, key=lambda g: g.area)
-        if poly.is_empty or poly.area <= 0:
-            skipped += 1
-            continue
+    cache = out / "osm_buildings.json"
+    if osm_cache and cache.exists():
+        data = json.loads(cache.read_text())
+        print(f"[input] OSM buildings from {cache} (delete it to fetch again)")
+    else:
+        print(f"[input] OSM buildings for {box_.to_str()} (outlines and tags)")
+        data = OSMClient().fetch(box_, [OSM_MAP_FEATURES.BUILDING])
+        cache.write_text(json.dumps(data))
+    elements = data.get("elements", [])
+    way_ids = {e.get("id") for e in elements if e.get("type") == "way"}
+
+    def to_xy(points):  # the pipeline's projection (MeshUtils.get_corners)
+        return get_corners({"geometry": points}, box_)
+
+    outlines = [
+        (el, poly) for el in elements for poly in outline_parts(el, to_xy, way_ids)
+    ]
+
+    # where export_mesh put the model: glb (X, Y, Z) = (x - ox - cx, z - cz, -(y - oy - cy))
+    if "terrain" in parts:
+        from terrain import build_terrain
+
+        grid = build_terrain(box_)  # the terrain stage's grid for this box
+        V = parts["terrain"].vertices
+        cx = grid.xs[0] - ox - V[:, 0].min()
+        cy = grid.ys[0] - oy + V[:, 2].max()
+        cz = -V[:, 1].min()  # the terrain's lowest point is its datum
+        z_datum = grid.z_datum
+    else:
+        built = [p for el, p in outlines if el.get("type") == "way"]
+        if not built:
+            sys.exit("[input] no OSM buildings for this box")
+        x0, y0, x1, y1 = unary_union(built).bounds
+        V = parts["buildings"].vertices
+        cx = (x0 + x1) / 2 - ox - (V[:, 0].min() + V[:, 0].max()) / 2
+        cy = (y0 + y1) / 2 - oy + (V[:, 2].min() + V[:, 2].max()) / 2
+        cz = -V[:, 1].min()  # buildings stand on flat ground at 0
+        z_datum = 0.0
+
+    def to_utm(v):  # back from the .glb to UTM (x, y) and elevation
+        v = np.asarray(v, float)
+        return np.c_[v[:, 0] + cx + ox, -v[:, 2] + cy + oy, v[:, 1] + cz + z_datum]
+
+    bld = parts["buildings"]
+    tri = to_utm(bld.vertices)[bld.faces]  # (n, 3, 3)
+    nz = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    area2 = np.linalg.norm(nz, axis=1)
+    nz = np.divide(nz[:, 2], area2, out=np.zeros(len(tri)), where=area2 > 0)
+    ctr = tri.mean(axis=1)
+    # horizontal faces: roofs and floors. (Their up/down direction is not used: export
+    # flips z, which turns the faces' winding inside out.)
+    flat = np.abs(nz) > 0.9
+    terrain = None
+    if "terrain" in parts:
+        terrain = _terrain_from_mesh(to_utm(parts["terrain"].vertices), z_datum)
+        diff = np.abs(terrain.z - grid.ground(*np.meshgrid(terrain.xs, terrain.ys)))
+        if not np.isfinite(diff).all() or diff.max() > 0.5:
+            print(
+                "[input] WARNING: the .glb's terrain differs from the elevation tiles by up "
+                f"to {np.nanmax(diff):.2f} m (tiles updated since the model was built?)"
+            )
+    print(
+        f"[input] {glb}: {len(tri):,} building faces, "
+        + (
+            f"terrain grid {len(terrain.xs)}x{len(terrain.ys)}"
+            if terrain
+            else "flat ground"
+        )
+    )
+
+    feats, used = [], np.zeros(len(tri), bool)
+    for el, poly in outlines:
         tags = el.get("tags", {})
-        base, top = get_base_and_height(el)
+        base, top_tag = get_base_and_height(el)
         props = {
             "osm_id": f"{el.get('type')}/{el.get('id')}",
             "name": tags.get("name", ""),
-            "height": round(top, 3),
             "min_height": round(base, 3),
             "height_source": building_heights(tags)[2],
+            "osm_rule_height": round(top_tag, 3),
         }
-        if terrain is not None:  # as extrude_buildings with terrain on
-            g_low, g_high = ground_under(corners, terrain)
-            bottom = g_high + base if base > 0 else g_low - embed_m
-            props["base_elev_m"] = round(bottom + terrain.z_datum, 3)
-            props["roof_elev_m"] = round(g_high + top + terrain.z_datum, 3)
-        feats.append((poly, props))
-    print(
-        f"[input] {len(feats)} footprints, EPSG:{epsg}"
-        + (
-            f" ({skipped} without a usable outline, also left out of the mesh)"
-            if skipped
-            else ""
+        inner = poly.buffer(-0.05) if poly.area > 1.0 else poly
+        x0, y0, x1, y1 = poly.bounds
+        near = (
+            (ctr[:, 0] >= x0)
+            & (ctr[:, 0] <= x1)
+            & (ctr[:, 1] >= y0)
+            & (ctr[:, 1] <= y1)
         )
-    )
-    if not feats:
-        sys.exit("[input] no buildings in this bounding box")
+        idx = np.flatnonzero(near & flat)
+        inside = idx[shapely.contains_xy(inner, ctr[idx, 0], ctr[idx, 1])]
+        props["in_mesh"] = bool(len(inside))
+        if not len(inside):
+            feats.append((poly, props))
+            continue
+        used[inside] = True
+        z = tri[inside][:, :, 2]
+        roof, floor = float(z.max()), float(z.min())
+        if terrain is not None:
+            _, g_high = ground_under(np.asarray(poly.exterior.coords)[:-1], terrain)
+            props["height"] = round(roof - (g_high + z_datum), 3)
+            props["roof_elev_m"] = round(roof, 3)
+            props["base_elev_m"] = round(floor, 3)
+        else:
+            props["height"] = round(roof, 3)
+        feats.append((poly, props))
+
+    n_in = sum(p["in_mesh"] for _, p in feats)
+    missing = sorted({p["name"] or p["osm_id"] for _, p in feats if not p["in_mesh"]})
+    stray = flat & ~used
+    print(f"[input] {len(feats)} OSM footprints, {n_in} found in the mesh, EPSG:{epsg}")
+    if missing:
+        print(
+            f"[input] in OSM but not in the mesh: {len(missing)} "
+            f"(e.g. {', '.join(missing[:5])})"
+        )
+    if stray.any():
+        share = stray.sum() / max(flat.sum(), 1)
+        print(
+            f"[input] {'WARNING: ' if share > 0.1 else ''}{share * 100:.0f}% of the mesh's "
+            "roof and floor faces lie in no OSM footprint "
+            + (
+                "(wrong bounding box?)"
+                if share > 0.1
+                else "(OSM changed since the model was built?)"
+            )
+        )
+    if not n_in:
+        sys.exit(
+            "[input] no OSM building matches the mesh: wrong .glb or bounding box?"
+        )
 
     (out / "buildings_footprints_utm.geojson").write_text(
         json.dumps(
@@ -241,7 +464,7 @@ def build_from_pipeline(bbox, use_terrain, out):
             x=terrain.xs,
             y=terrain.ys,
             z=terrain.z + terrain.z_datum,
-            source="Terrarium (terrain stage)",
+            source=f"{glb.name} terrain",
             spacing=terrain.spacing,
         )
         terrain_fn = lambda xs, ys: terrain.ground(xs, ys) + terrain.z_datum  # noqa: E731
@@ -697,12 +920,18 @@ def evaluate_buildings(feats, terrain, pts, a):
                 "height",
                 "min_height",
                 "height_source",
+                "osm_rule_height",
                 "base_elev_m",
                 "roof_elev_m",
             )
         }
+        row["in_mesh"] = p.get("in_mesh", True)
         row["footprint_m2"] = round(poly.area, 1)
         row["height_confidence"] = CONFIDENCE.get(p.get("height_source"), "low")
+        if row["in_mesh"] is False:  # in OSM, but the model has no such building
+            row["status"] = "not_in_mesh"
+            rows.append(row)
+            continue
         m = measure_building(poly, ctx, a, p.get("min_height") or 0)
         ring = m.pop("_ring", None)
         row.update(m)
@@ -877,7 +1106,7 @@ def _example(rows, group):
 
 def write_markdown(path, summary, status, meta, args, req, rows):
     names = {
-        "M1_height_err": "M1 height (OSM − LiDAR)",
+        "M1_height_err": "M1 height (model − LiDAR)",
         "M1_height_err_vs_median": "M1 vs LiDAR median roof",
         "M2_terrain_err": "M2 terrain at building",
         "M2_base_err": "M2 base placement",
@@ -886,6 +1115,9 @@ def write_markdown(path, summary, status, meta, args, req, rows):
     }
     A = summary["all"]
     t, h = req["terrain"], req["height"]
+    miss = [r for r in rows if r.get("in_mesh") is False]
+    miss_names = sorted({r["name"] or r["osm_id"] for r in miss})
+    n_miss_rel = sum(str(r["osm_id"]).startswith("relation/") for r in miss)
     fp, ev = h["footprints_by_confidence"], h["evaluated_by_confidence"]
     n_ev = sum(ev.values())
 
@@ -926,6 +1158,18 @@ def write_markdown(path, summary, status, meta, args, req, rows):
                 f"  - {label}: {g['share'] * 100:.0f}% within ±{h['tol_m']:g} m, "
                 f"median {med:+.2f} m, n = {g['n']}"
             )
+    if miss:
+        L.append(
+            f"- **In OSM but not in the mesh:** {len(miss)} footprint(s), e.g. "
+            f"{', '.join(miss_names[:5])}"
+            + (
+                f". {n_miss_rel} of them are OSM relations (multipolygons), which "
+                "`extrude.py` does not build yet"
+                if n_miss_rel
+                else ""
+            )
+            + ". They are listed in `per_building.csv` as `not_in_mesh`."
+        )
     L += [
         f"- **Height confidence flag:** every building in `per_building.csv` and "
         f"`per_building_errors.geojson` carries `height_confidence` (high / medium / low), taken "
@@ -1230,7 +1474,7 @@ def make_plots(rows, feats, out, a):
     ax.set_ylim(-0.6, len(srcs) - 0.1)
     ax.set_xlim(-lim * 1.02, lim * 1.02)
     ax.grid(axis="y", visible=False)
-    ax.set_xlabel("Height error, OSM − LiDAR (m)")
+    ax.set_xlabel("Height error, model − LiDAR (m)")
     ax.text(
         0.0,
         -0.16,
@@ -1298,7 +1542,7 @@ def make_plots(rows, feats, out, a):
         xlim=(0, hi),
         ylim=(0, hi),
         xlabel="Real height from LiDAR (m)",
-        ylabel="Height in our model, from OSM (m)",
+        ylabel="Height in our model (m)",
     )
     ax.set_aspect("equal")
     ax.legend(
@@ -1463,7 +1707,7 @@ def make_plots(rows, feats, out, a):
     _head(
         fig,
         "Which buildings' heights differ most from the LiDAR?",
-        "Red = model too tall, blue = too short, pale = about right (OSM − LiDAR, m).",
+        "Red = model too tall, blue = too short, pale = about right (model − LiDAR, m).",
     )
     fig.savefig(out / "05_height_error_map.png", dpi=160)
     plt.close(fig)
@@ -1569,26 +1813,31 @@ def build_parser():
     )
     inp = ap.add_mutually_exclusive_group(required=True)
     inp.add_argument(
-        "--bbox",
-        nargs=4,
-        type=float,
-        metavar=("WEST", "SOUTH", "EAST", "NORTH"),
-        help="build the buildings for this box with the pipeline's code (degrees)",
+        "model",
+        nargs="?",
+        help="the pipeline's output: a job folder (output/jobs/<id>/) or a .glb",
+    )
+    inp.add_argument(
+        "--latest",
+        action="store_true",
+        help="the newest job in output/jobs/ (run from the repo root)",
     )
     inp.add_argument(
         "--from-dir",
         metavar="DIR",
-        help="reuse buildings_footprints_utm.geojson (+ terrain_grid.npz) in DIR, "
-        "e.g. from an earlier --bbox run",
+        help="evaluate again from what an earlier run saved in DIR (no .glb or OSM)",
     )
     ap.add_argument(
-        "--no-terrain",
-        action="store_true",
-        help="flat ground, as src/main.py without --terrain: heights only",
+        "--bbox",
+        nargs=4,
+        type=float,
+        metavar=("WEST", "SOUTH", "EAST", "NORTH"),
+        help="the box the model was built with; only for a .glb without job.json "
+        "(made with src/main.py)",
     )
     ap.add_argument(
         "--out",
-        help="output folder (default output/geometry_eval, or DIR with --from-dir)",
+        help="output folder (default geometry_eval/ next to the .glb, or DIR with --from-dir)",
     )
     src = ap.add_mutually_exclusive_group()
     src.add_argument("--laz", nargs="+", help="local LAS/LAZ tiles instead of USGS EPT")
@@ -1708,28 +1957,17 @@ def build_parser():
 def main():
     a = build_parser().parse_args()
 
-    out = Path(a.out or a.from_dir or "output/geometry_eval")
-    out.mkdir(parents=True, exist_ok=True)
-    if a.bbox:
-        feats, utm_crs, terrain, embed = build_from_pipeline(
-            a.bbox, not a.no_terrain, out
-        )
+    if a.model or a.latest:
+        glb = find_model(a.model, a.latest)
+        out = Path(a.out) if a.out else glb.parent / "geometry_eval"
+        out.mkdir(parents=True, exist_ok=True)
+        feats, utm_crs, terrain, embed = build_from_glb(glb, out, a.bbox)
     else:
+        out = Path(a.out or a.from_dir)
+        out.mkdir(parents=True, exist_ok=True)
         src = Path(a.from_dir)
         feats, utm_crs = load_footprints(src / "buildings_footprints_utm.geojson")
-        terrain = None if a.no_terrain else load_terrain(src / "terrain_grid.npz")
-        if a.no_terrain:
-            feats = [
-                (
-                    g,
-                    {
-                        k: v
-                        for k, v in p.items()
-                        if k not in ("base_elev_m", "roof_elev_m")
-                    },
-                )
-                for g, p in feats
-            ]
+        terrain = load_terrain(src / "terrain_grid.npz")
         embed = EMBED_M
     if a.embed is None:
         a.embed = embed
@@ -1774,7 +2012,9 @@ def main():
         "osm_id",
         "name",
         "status",
+        "in_mesh",
         "height_source",
+        "osm_rule_height",
         "height_confidence",
         "height",
         "min_height",

@@ -1,15 +1,20 @@
-"""scripts/eval/eval_geometry_lidar.py on a synthetic scene: no network, known answers."""
+"""scripts/eval/eval_geometry_lidar.py on a synthetic scene: the pipeline builds and exports
+a .glb, the script evaluates that file. No network, known answers."""
 
 import importlib.util
+import json
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from common.MeshUtils import _get_utm_transformer
-from mesh_builder.extrude import EMBED_M
-from terrain import Terrain
+from common import ProgressMonitor
 from common.constants import BoundingBox
+from common.MeshUtils import _get_utm_transformer
+from common.pipeline_chain import PipelineState
+from mesh_builder.extrude import EMBED_M, extrude_buildings
+from pipeline import export_mesh
+from terrain import Terrain
 
 SCRIPT = (
     Path(__file__).resolve().parents[1] / "scripts" / "eval" / "eval_geometry_lidar.py"
@@ -28,6 +33,9 @@ BUILDINGS = [
     ({"height": "12"}, 12.5),  # height tag, 0.5 m too short
     ({"building:levels": "4"}, 18.0),  # 14 m from levels, 4 m too short
     ({}, 6.0),  # untagged: 10.5 m default, 4.5 m too tall
+    # a multipolygon relation with a courtyard, like the Duderstadt Center: extrude.py
+    # does not build relations, so it is not in the mesh
+    ({"building:levels": "3", "type": "multipolygon"}, 15.4),
 ]
 TO_UTM = _get_utm_transformer(
     (BBOX.min_lon + BBOX.max_lon) / 2, (BBOX.min_lat + BBOX.max_lat) / 2
@@ -51,7 +59,47 @@ def _element(i, tags):
     }
 
 
-ELEMENTS = [_element(i, tags) for i, (tags, _) in enumerate(BUILDINGS)]
+def _relation(i, tags):
+    """The same square as _element(i), as a relation: its outer ring split over two member
+    ways (as OSM often does) and an inner ring (a courtyard)."""
+    lon0, lat0, dlon, dlat = -83.7480 + 0.0007 * i, 42.2836, 0.0003, 0.0002
+
+    def pts(ring):
+        return [{"lat": lat0 + fy * dlat, "lon": lon0 + fx * dlon} for fx, fy in ring]
+
+    return {
+        "type": "relation",
+        "id": 900 + i,
+        "tags": {"building": "university", **tags},
+        "members": [
+            {
+                "type": "way",
+                "ref": 1,
+                "role": "outer",
+                "geometry": pts([(0, 0), (1, 0), (1, 1)]),
+            },
+            {
+                "type": "way",
+                "ref": 2,
+                "role": "outer",
+                "geometry": pts([(1, 1), (0, 1), (0, 0)]),
+            },
+            {
+                "type": "way",
+                "ref": 3,
+                "role": "inner",
+                "geometry": pts(
+                    [(0.3, 0.3), (0.7, 0.3), (0.7, 0.7), (0.3, 0.7), (0.3, 0.3)]
+                ),
+            },
+        ],
+    }
+
+
+ELEMENTS = [
+    (_relation if tags.get("type") == "multipolygon" else _element)(i, tags)
+    for i, (tags, _) in enumerate(BUILDINGS)
+]
 
 
 def _terrain():
@@ -99,43 +147,83 @@ def _lidar(terrain, feats):
     return tuple(np.concatenate([p[k] for p in parts]) for k in range(4))
 
 
+def _export(tmp_path, terrain):
+    """The pipeline's mesh and .glb for ELEMENTS (extrude_buildings + export_mesh)."""
+    mesh = extrude_buildings({"elements": ELEMENTS}, BBOX, terrain=terrain)
+    path = tmp_path / "model.glb"
+    state = PipelineState(
+        initial_input=None,
+        current_value=None,
+        metadata={
+            "bbox": BBOX,
+            "terrain": terrain,
+            "output_path": str(path),
+            "progress_monitor": ProgressMonitor(verbose=False),
+        },
+    )
+    export_mesh(mesh, state)
+    return path
+
+
+BOX = (BBOX.min_lon, BBOX.min_lat, BBOX.max_lon, BBOX.max_lat)
+
+
 @pytest.fixture
-def scene(monkeypatch, tmp_path):
-    terrain = _terrain()
+def osm(monkeypatch):
+    """OSM and the elevation tiles as the pipeline saw them."""
     monkeypatch.setattr(
         "common.providers.OSMClient.fetch",
         lambda self, bbox, f=None: {"elements": ELEMENTS},
     )
-    monkeypatch.setattr("terrain.build_terrain", lambda bbox, **kw: terrain)
-    bbox = (BBOX.min_lon, BBOX.min_lat, BBOX.max_lon, BBOX.max_lat)
-    feats, crs, terrain_fn, embed = ev.build_from_pipeline(bbox, True, tmp_path)
-    a = ev.build_parser().parse_args(["--from-dir", str(tmp_path)])
+    monkeypatch.setattr("terrain.build_terrain", lambda bbox, **kw: _terrain())
+
+
+@pytest.fixture
+def scene(osm, tmp_path):
+    terrain = _terrain()
+    glb = _export(tmp_path, terrain)
+    out = tmp_path / "eval"
+    out.mkdir()
+    feats, crs, terrain_fn, embed = ev.build_from_glb(glb, out, BOX)
+    a = ev.build_parser().parse_args(["--from-dir", str(out)])
     a.embed = embed
     pts = _lidar(terrain, feats)
-    return feats, crs, terrain_fn, a, pts, tmp_path
+    return feats, crs, terrain_fn, a, pts, out
 
 
-def test_buildings_are_placed_as_extrude_py_places_them(scene):
+def test_buildings_are_read_back_from_the_glb(scene):
     feats, crs, _, a, _, out = scene
     assert crs == "EPSG:32617" and a.embed == EMBED_M
-    assert [p["height_source"] for _, p in feats] == ["height", "levels", "default"]
-    assert [p["height"] for _, p in feats] == [12.0, 14.0, 10.5]
+    assert [p["in_mesh"] for _, p in feats] == [True, True, True, False]
+    assert [p["height_source"] for _, p in feats] == [
+        "height",
+        "levels",
+        "default",
+        "levels",
+    ]
     terrain = _terrain()
-    for poly, p in feats:
+    for poly, p in feats[:3]:
+        # the height extrude.py used, the walls down to the lowest ground - EMBED_M and
+        # the roof on the highest ground, all measured in the .glb
+        assert p["height"] == pytest.approx(p["osm_rule_height"], abs=0.01)
         ox, _ = np.asarray(poly.exterior.coords).T
         g_low = SLOPE * (ox.min() - terrain.xs[0]) + Z_DATUM
         g_high = SLOPE * (ox.max() - terrain.xs[0]) + Z_DATUM
         assert p["base_elev_m"] == pytest.approx(g_low - EMBED_M, abs=0.02)
         assert p["roof_elev_m"] == pytest.approx(g_high + p["height"], abs=0.02)
-    assert (out / "buildings_footprints_utm.geojson").exists()
-    assert (out / "terrain_grid.npz").exists()
+    for name in (
+        "buildings_footprints_utm.geojson",
+        "terrain_grid.npz",
+        "osm_buildings.json",
+    ):
+        assert (out / name).exists()
 
 
 def test_metrics_match_the_known_errors(scene):
     feats, _, terrain_fn, a, pts, _ = scene
     rows, _ = ev.evaluate_buildings(feats, terrain_fn, pts, a)
-    assert [r["status"] for r in rows] == ["ok"] * 3
-    for r, (_, real_h) in zip(rows, BUILDINGS):
+    assert [r["status"] for r in rows] == ["ok", "ok", "ok", "not_in_mesh"]
+    for r, (_, real_h) in zip(rows[:3], BUILDINGS):
         assert r["roof_method_used"] == "ransac"  # the tree is ignored
         assert r["lidar_height"] == pytest.approx(real_h, abs=0.05)
         assert r["M1_height_err"] == pytest.approx(r["height"] - real_h, abs=0.05)
@@ -185,3 +273,78 @@ def test_terrain_is_judged_and_heights_are_a_baseline(scene):
     assert req["terrain"]["share"] == 1.0
     assert req["height"]["hits"] == 1  # only the height-tagged building is within 3 m
     assert set(req["height"]["groups"]) == {"high", "medium", "low"}
+
+
+def test_buildings_missing_from_the_mesh_are_reported(scene):
+    """A relation (e.g. Duderstadt Center) has its outline in its members: the script
+    reads it, with the courtyard cut out, and reports that the mesh has no such
+    building."""
+    feats, _, terrain_fn, a, pts, _ = scene
+    poly, props = feats[3]
+    assert props["osm_id"] == "relation/903" and props["in_mesh"] is False
+    assert len(poly.interiors) == 1  # the courtyard
+    rows, _ = ev.evaluate_buildings(feats, terrain_fn, pts, a)
+    assert rows[3]["status"] == "not_in_mesh"
+
+
+def test_a_flat_model_gets_heights_only(osm, tmp_path):
+    glb = _export(tmp_path, terrain=None)
+    feats, _, terrain_fn, _ = ev.build_from_glb(glb, tmp_path, BOX)
+    assert terrain_fn is None
+    assert [p.get("height") for _, p in feats[:3]] == pytest.approx([12.0, 14.0, 10.5])
+    assert all("roof_elev_m" not in p for _, p in feats)
+
+
+def test_a_web_app_job_gives_its_own_bounding_box(osm, tmp_path):
+    job = tmp_path / "jobs" / "abc123"
+    job.mkdir(parents=True)
+    _export(job, _terrain())
+    west, south, east, north = BOX
+    (job / "job.json").write_text(
+        json.dumps(
+            {"bbox": {"west": west, "south": south, "east": east, "north": north}}
+        )
+    )
+    glb = ev.find_model(latest=True, jobs_dir=tmp_path / "jobs")
+    assert glb == job / "model.glb" == ev.find_model(job)
+    feats, _, _, _ = ev.build_from_glb(glb, tmp_path)
+    assert [p["in_mesh"] for _, p in feats] == [True, True, True, False]
+
+
+def test_buildings_split_over_several_meshes_are_joined(osm, tmp_path):
+    """A textured model can load as several meshes (geometry_0, geometry_1, ...)."""
+    import trimesh
+
+    glb = _export(tmp_path, _terrain())
+    scene = trimesh.load(glb, force="scene")
+    buildings, ground = scene.geometry["buildings"], scene.geometry["terrain"]
+    split = trimesh.Scene()
+    for k, faces in enumerate(np.array_split(np.arange(len(buildings.faces)), 3)):
+        split.add_geometry(
+            buildings.submesh([faces], append=True), geom_name=f"geometry_{k}"
+        )
+    split.add_geometry(ground, node_name="terrain", geom_name="terrain")
+    split.export(glb)
+    feats, _, _, _ = ev.build_from_glb(glb, tmp_path, BOX)
+    assert [p["in_mesh"] for _, p in feats] == [True, True, True, False]
+    assert [p["height"] for _, p in feats[:3]] == pytest.approx(
+        [12.0, 14.0, 10.5], abs=0.01
+    )
+
+
+def test_a_glb_without_job_json_needs_its_bounding_box(osm, tmp_path):
+    glb = _export(tmp_path, _terrain())
+    with pytest.raises(SystemExit, match="--bbox"):
+        ev.build_from_glb(glb, tmp_path)
+
+
+def test_relation_members_already_fetched_as_ways_are_not_counted_twice():
+    relation = _relation(0, {})
+
+    def to_xy(points):
+        return [TO_UTM.transform(p["lon"], p["lat"]) for p in points]
+
+    # member way 1 is also a building way of its own: only member 2 is left, which is
+    # not a closed ring, so the relation adds no footprint
+    assert ev.outline_parts(relation, to_xy, way_ids={1}) == []
+    assert len(ev.outline_parts(relation, to_xy)) == 1
