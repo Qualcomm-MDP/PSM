@@ -71,6 +71,48 @@ export                  17.48     3.32     283.2           0.0       ok
 TOTAL                  405.30
 ```
 
+## Geometry evaluation against LiDAR
+
+`src/evaluation/geometry_lidar.py` measures how close the exported model is to the real buildings and ground, using USGS 3DEP airborne LiDAR (US only) as the reference. It reads the geometry straight from the `.glb`: each building's roof and base from the mesh, and the ground from the model's terrain. OSM only splits the mesh into buildings and gives each its id, name and height tags.
+
+| Metric                 | What it measures (model − LiDAR, metres)                                                                               |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| **M1** height          | model height − LiDAR height (roof top above the lowest ground at the footprint's edge)                                 |
+| **M2** terrain         | model ground − LiDAR ground around the building (median per building)                                                  |
+| Base placement         | the model's lowest ground under the footprint − the LiDAR's                                                            |
+| **M3** roof elevation  | the model's roof − the LiDAR roof top, in absolute elevation: what the viewer sees                                     |
+
+The LiDAR roof top is the highest roof plane found by RANSAC, so trees, antennas and rooftop equipment are ignored. Results are judged against draft requirement QR-06:
+
+- **QR-06a terrain (pass/fail):** at least 95% of buildings within ±1 m of the LiDAR ground, at the lower end of the 95% confidence interval. Fewer than 30 evaluated buildings is inconclusive.
+- **QR-06b height (baseline):** the share within ±3 m, split by height confidence: `height` tag (high), `building:levels` (medium) or the default (low). `--height-baseline` compares a run with an earlier one.
+
+### Running it
+
+It needs [laspy](https://laspy.readthedocs.io/) to read the LiDAR tiles. It's in the optional `eval` group, and the Docker image includes it:
+
+```bash
+poetry install --with eval
+```
+
+- **Web app:** turn on **Evaluate geometry against LiDAR** (see [Web App](../web-app.md#evaluating-geometry)). It runs as the pipeline's last stage, `evaluate_geometry`, and writes into the job's `geometry_eval/` folder.
+- **Command line, with the pipeline:** `poetry run python src/main.py --bbox ... --terrain --evaluate-geometry` writes `geometry_eval/` next to the `.glb`.
+- **Command line, on a finished model:**
+
+```bash
+poetry run python scripts/eval/eval_geometry_lidar.py --latest              # newest web app job
+poetry run python scripts/eval/eval_geometry_lidar.py output/jobs/<job id>
+poetry run python scripts/eval/eval_geometry_lidar.py model.glb --bbox W S E N   # a .glb from src/main.py
+```
+
+`--help` lists the tolerances, the roof method and local LiDAR (`--laz`). Downloaded LiDAR tiles are cached in `$LIDAR_CACHE_DIR` (in Docker, `/cache/lidar` in the model-cache volume), else `~/.cache/lidar_eval`.
+
+When it can't run (no USGS LiDAR covers the area, laspy is missing, or there's no internet), the pipeline stage records why and the job still finishes with its model.
+
+### Output
+
+`summary.md` (start here), `summary.json`, `per_building.csv`, `per_building_errors.geojson` (open in QGIS), five charts (`01_scorecard.png` to `05_height_error_map.png`), and what it read from the mesh and OSM (`buildings_footprints_utm.geojson`, `terrain_grid.npz`, `osm_buildings.json`).
+
 ## Comparing runs
 
 The JSON reports make it easy to compare runs with and without obstruction removal (`--no-seg`), on different hardware, or on different area sizes. Three benchmark runs from **Design Review 1** (older pipeline):
@@ -103,3 +145,5 @@ Quality is assessed by asking 20 randomly chosen University of Michigan students
 ## Source code
 
 - `src/common/profiler.py`: `PipelineProfiler`, `StageMetrics`
+- `src/evaluation/__init__.py`: the `evaluate_geometry` stage and `evaluate_model`
+- `src/evaluation/geometry_lidar.py`: the geometry evaluation (`scripts/eval/eval_geometry_lidar.py` runs it)

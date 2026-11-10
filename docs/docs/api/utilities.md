@@ -29,7 +29,7 @@ def ground_under(corners, terrain) -> tuple[float, float]
 
 Lowest and highest ground (m above terrain datum) under a footprint.
 
-[source](https://github.com/Qualcomm-MDP/PSM/blob/main/src/mesh_builder/extrude.py#L25)
+[source](https://github.com/Qualcomm-MDP/PSM/blob/main/src/mesh_builder/extrude.py#L28)
 
 ### extrude_buildings()
 
@@ -39,10 +39,11 @@ def extrude_buildings(
     area_bbox,
     reporter: Reporter | None = None,
     terrain=None,
+    flagged=None,
 )
 ```
 
-[source](https://github.com/Qualcomm-MDP/PSM/blob/main/src/mesh_builder/extrude.py#L41)
+[source](https://github.com/Qualcomm-MDP/PSM/blob/main/src/mesh_builder/extrude.py#L44)
 
 ## Terrain
 
@@ -400,6 +401,44 @@ def tex_projection(value, state: PipelineState)
 ```
 
 [source](https://github.com/Qualcomm-MDP/PSM/blob/main/src/texturing/tex_projection.py#L599)
+
+## Geometry evaluation (LiDAR)
+
+### evaluate_geometry_stage()
+
+```python
+def evaluate_geometry_stage(value, state)
+```
+
+Pipeline stage after export: evaluate the written .glb against LiDAR when
+"evaluate_geometry" is on. Its result (evaluate_model) goes to the
+"geometry_evaluation" metadata; the job never fails because of it.
+
+[source](https://github.com/Qualcomm-MDP/PSM/blob/main/src/evaluation/__init__.py#L102)
+
+### evaluate_model()
+
+```python
+def evaluate_model(
+    glb: str | Path,
+    bbox: tuple[float, float, float, float],
+    out: str | Path | None = None,
+    osm: dict[str, Any] | None = None,
+    grid: Any = None,
+    reporter: Reporter | None = None,
+    **overrides: Any = {},
+) -> dict[str, Any]
+```
+
+Evaluate a model .glb built for `bbox` (west, south, east, north); never raises.
+
+Returns the compact summary (geometry_lidar.web_summary) with status "done", or
+{"status": "unavailable" | "failed", "reason": ...} when it can't run here (no
+USGS LiDAR for the area, laspy not installed, no internet) or crashed. Progress
+goes to `reporter` (the job log), or is printed without one. `overrides` are
+command-line settings (geometry_lidar.build_parser), e.g. terrain_tol=0.5.
+
+[source](https://github.com/Qualcomm-MDP/PSM/blob/main/src/evaluation/__init__.py#L37)
 
 ## Obstruction removal
 

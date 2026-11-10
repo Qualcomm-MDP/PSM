@@ -25,9 +25,14 @@ from api.joblog import JobReporter
 from common import PipelineChain, PipelineProfiler, ProgressMonitor
 from common.constants import BoundingBox
 from common.redact import redact
+from evaluation import EVALUATION_DIR
 
 # Stages that only do something when their job option is on.
-OPTIONAL_STAGES = {"terrain": "terrain", "naip": "naip"}
+OPTIONAL_STAGES = {
+    "terrain": "terrain",
+    "naip": "naip",
+    "evaluate_geometry": "evaluate_geometry",
+}
 
 SEG_MODELS = {
     # Mapillary Vistas: trained on Mapillary's own crowdsourced photos (no Tiny exists)
@@ -271,6 +276,8 @@ class JobManager:
                     "seg_device": opts.get("device", "auto"),
                     "use_terrain": opts.get("terrain", False),
                     "use_naip": opts.get("naip", False),
+                    "evaluate_geometry": opts.get("evaluate_geometry", False),
+                    "evaluation_dir": str(job_dir / EVALUATION_DIR),
                     "output_path": str(model_path),
                     "image_dir": str(job_dir / "images"),
                     "reporter": log,
@@ -336,6 +343,9 @@ def _summarize(state: Any, job_dir: Path) -> dict[str, Any]:
     faces = getattr(mesh, "faces", None)
     if faces is not None:
         result["faces"] = int(len(faces))
+    evaluation = state.get_metadata("geometry_evaluation", None)
+    if evaluation is not None:  # with the option: its headline results, or why not
+        result["evaluation"] = evaluation
     model_path = job_dir / "model.glb"
     if model_path.exists():
         result["model_bytes"] = model_path.stat().st_size

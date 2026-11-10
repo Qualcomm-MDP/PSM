@@ -61,6 +61,10 @@ dev = [
   "pytest>=9.0.2,<10",
   "ruff>=0.17.3,<0.18",
 ]
+# The geometry evaluation's LiDAR reader (evaluation/geometry_lidar.py): poetry install --with eval
+eval = [
+  "laspy[lazrs]>=2.5,<3",
+]
 
 [tool.poetry]
 package-mode = false

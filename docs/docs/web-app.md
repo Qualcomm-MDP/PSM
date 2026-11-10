@@ -23,6 +23,7 @@ The size of the area is shown under the coordinates. Each side can be at most 2.
 | **Terrain**             | Put buildings on real ground heights and add the ground to the model.                                                                                                                   |
 | **Aerial photos**       | Texture the ground and roofs with NAIP aerial photos. Continental US only; turns on Terrain (and locks it on while it's on). A note appears if the area looks outside NAIP's coverage. |
 | **Profile this run**    | Measure each stage's time and memory, shown live in the job's details. See [Profiling a job](#profiling-a-job).                                                                         |
+| **Evaluate geometry against LiDAR** | After export, compare the model's buildings and ground with USGS airborne LiDAR. US only, needs internet, adds a few minutes. A note appears if the area looks outside the US. See [Evaluating geometry](#evaluating-geometry). |
 
 The starting values come from the defaults in [Settings](#settings).
 
@@ -32,7 +33,7 @@ The starting values come from the defaults in [Settings](#settings).
 
 Press **Generate model**. While a job runs:
 
-- The **timeline** shows each pipeline stage as pending, running, done, or failed. Stages turned off for this job (Terrain, Aerial photo) show as **Skipped**.
+- The **timeline** shows each pipeline stage as pending, running, done, or failed. Stages turned off for this job (Terrain, Aerial photo, Evaluate geometry) show as **Skipped**.
 - The **pipeline log** streams the job's output live, including progress bars such as the photo downloads. **Download log** saves it as a text file.
 - The 3D preview is greyed out, and **Generate model** is disabled until the job finishes.
 
@@ -78,6 +79,24 @@ The profile **updates live** while the job runs: after every stage, and the runn
 - In **Recent jobs**, profiled jobs carry a **Profiled** marker; open the job to see its profile, finished or not.
 
 A job that fails keeps its profile up to the failed stage. Peak memory is what Python's `tracemalloc` sees: Python and NumPy allocations, not the whole process (for example not PyTorch's own buffers or GPU memory). Profiling makes a run slower, because `tracemalloc` records every allocation.
+
+## Evaluating geometry
+
+Turn on **Evaluate geometry against LiDAR** to check the finished model against real measurements. After the model is exported, the **Evaluate geometry** stage downloads the USGS 3DEP airborne LiDAR for the area and compares each building and the ground with it (the same evaluation as the command line's, see [Evaluation](pipeline/evaluation.md#geometry-evaluation-against-lidar)). Its progress streams into the pipeline log like any other stage. Turn on **Terrain** as well to get every metric: a flat model only gets the building heights.
+
+The job's details then get an **Evaluation** section, below the Profile:
+
+- **Terrain verdict:** **✓ Pass**, **✗ Fail**, **? Inconclusive** or **– Not tested**, with the share of buildings whose ground is within ±1 m of the LiDAR ground and its 95% confidence interval. It passes when the interval's lower end reaches 95%; fewer than 30 evaluated buildings is always inconclusive.
+- **Headline figures:** how many OSM buildings were evaluated, the share of heights within ±3 m (about one storey), and the median height and terrain errors. Errors are model − LiDAR: positive means the model is too tall or too high.
+- **Heights by confidence:** the share within ±3 m for buildings whose OSM height came from a `height` tag (high confidence), from `building:levels` (medium), or from the default when there is no tag (low). This is a baseline to compare runs with, not pass/fail: OSM often has no measured height.
+- **Errors:** the median, RMSE and NMAD of each metric: height (M1), terrain at the building (M2), base placement, and roof elevation (M3).
+- **Not evaluated:** buildings left out and why, for example in OSM but not in the model, or too small to measure.
+- **Charts:** the evaluation's scorecard, height errors by source, model against LiDAR height, placement against slope, and an error map. Click one to open it full size.
+- **Full report:** the evaluation's `summary.md`, and downloads of the report, the per-building CSV, a GeoJSON map of the errors (open it in QGIS) and the full summary.
+
+The results appear when the job finishes. **View evaluation**, next to the progress bar, opens the current job's evaluation, and **Recent jobs** marks evaluated jobs **Evaluated**.
+
+If the evaluation can't run here (no USGS LiDAR for the area, no internet, or the LiDAR reader missing), the section says why and the job still finishes with its model. The same goes for an evaluation that fails. The results are saved in the job's `geometry_eval/` folder.
 
 ## Settings
 

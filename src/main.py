@@ -151,6 +151,13 @@ def main():
         default=None,
         help="With --poses colmap, reuse this ROI folder (outputs/alignment/mapillary_roi_N)",
     )
+    parser.add_argument(
+        "--evaluate-geometry",
+        action="store_true",
+        help="After export, compare the model's buildings and terrain with USGS LiDAR "
+        "(US only; needs `poetry install --with eval`). Writes geometry_eval/ next to "
+        "the .glb. Off by default.",
+    )
     args = parser.parse_args()
 
     if args.bbox is not None:
@@ -174,6 +181,8 @@ def main():
         skip_stages.add("terrain")
     if not args.naip:
         skip_stages.add("naip")
+    if not args.evaluate_geometry:
+        skip_stages.add("evaluate_geometry")
     run_pipeline.run(
         bbox,
         metadata={
@@ -191,6 +200,7 @@ def main():
             "pose_source": args.poses,
             "aligned_only": args.aligned_only,
             "alignment_dir": args.alignment_dir,
+            "evaluate_geometry": args.evaluate_geometry,
         },
         profiler=profiler,
         skip_stages=skip_stages,
