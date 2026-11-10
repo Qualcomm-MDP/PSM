@@ -609,7 +609,7 @@ def evaluating_pipeline(result, seen=None):
         get_reporter(state).info("[lidar] 1,234 points kept")
         out = Path(state.metadata["evaluation_dir"])
         out.mkdir(parents=True, exist_ok=True)
-        (out / "summary.md").write_text("# LiDAR geometry evaluation\n")
+        (out / "summary.md").write_bytes(b"# LiDAR geometry evaluation\n")
         (out / "01_scorecard.png").write_bytes(b"png")
         (out / "lidar_points_abc.npz").write_bytes(b"cached points")
         state.set_metadata("geometry_evaluation", result)

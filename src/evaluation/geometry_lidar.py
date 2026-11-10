@@ -153,7 +153,7 @@ GROUPS = [
 # Inputs: the pipeline's buildings and terrain
 # ----------------------------------------------------------------------------
 def load_footprints(path):
-    d = json.loads(Path(path).read_text())
+    d = json.loads(Path(path).read_text(encoding="utf-8"))
     name = (d.get("crs") or {}).get("properties", {}).get("name", "")
     epsg = name.split(":")[-1] if name else None
     if not epsg or not epsg.isdigit():
@@ -322,7 +322,7 @@ def build_from_glb(glb, out, bbox=None, osm_cache=True, osm=None, grid=None):
     glb = Path(glb)
     job = glb.parent / "job.json"
     if bbox is None and job.exists():
-        b = json.loads(job.read_text())["bbox"]
+        b = json.loads(job.read_text(encoding="utf-8"))["bbox"]
         bbox = (b["west"], b["south"], b["east"], b["north"])
     if bbox is None:
         sys.exit(
@@ -339,14 +339,14 @@ def build_from_glb(glb, out, bbox=None, osm_cache=True, osm=None, grid=None):
     cache = out / "osm_buildings.json"
     if osm is not None:
         data = osm
-        cache.write_text(json.dumps(data))
+        cache.write_text(json.dumps(data), encoding="utf-8")
     elif osm_cache and cache.exists():
-        data = json.loads(cache.read_text())
+        data = json.loads(cache.read_text(encoding="utf-8"))
         _log(f"[input] OSM buildings from {cache} (delete it to fetch again)")
     else:
         _log(f"[input] OSM buildings for {box_.to_str()} (outlines and tags)")
         data = OSMClient().fetch(box_, [OSM_MAP_FEATURES.BUILDING])
-        cache.write_text(json.dumps(data))
+        cache.write_text(json.dumps(data), encoding="utf-8")
     elements = data.get("elements", [])
     way_ids = {e.get("id") for e in elements if e.get("type") == "way"}
 
@@ -485,7 +485,8 @@ def build_from_glb(glb, out, bbox=None, osm_cache=True, osm=None, grid=None):
                     for g, p in feats
                 ],
             }
-        )
+        ),
+        encoding="utf-8",
     )
     terrain_fn = None
     if terrain is not None:
@@ -1275,7 +1276,7 @@ def write_markdown(path, summary, status, meta, args, req, rows):
                 f"{_fmt(s_, 'within_3m', True)} |"
             )
         L.append("")
-    path.write_text("\n".join(L))
+    path.write_text("\n".join(L), encoding="utf-8")
 
 
 # ----------------------------------------------------------------------------
@@ -2108,7 +2109,7 @@ def run_evaluation(a, out, glb=None, osm=None, grid=None):
         "M3_roof_err",
         "M3_roof_err_lowground",
     ]
-    with open(out / "per_building.csv", "w", newline="") as f:
+    with open(out / "per_building.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
@@ -2126,7 +2127,8 @@ def run_evaluation(a, out, glb=None, osm=None, grid=None):
                     for (g, _), r in zip(feats, rows)
                 ],
             }
-        )
+        ),
+        encoding="utf-8",
     )
     web = web_summary(rows, status, req, summary, meta)
     (out / "summary.json").write_text(
@@ -2141,7 +2143,8 @@ def run_evaluation(a, out, glb=None, osm=None, grid=None):
             },
             indent=2,
             default=str,
-        )
+        ),
+        encoding="utf-8",
     )
     write_markdown(out / "summary.md", summary, status, meta, a, req, rows)
     make_plots(rows, feats, out, a)
