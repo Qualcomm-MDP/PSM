@@ -25,13 +25,14 @@ from api.joblog import JobReporter
 from common import PipelineChain, PipelineProfiler, ProgressMonitor
 from common.constants import BoundingBox
 from common.redact import redact
-from evaluation import EVALUATION_DIR
+from evaluation import EVALUATION_DIR, TEXTURE_EVALUATION_DIR
 
 # Stages that only do something when their job option is on.
 OPTIONAL_STAGES = {
     "terrain": "terrain",
     "naip": "naip",
     "evaluate_geometry": "evaluate_geometry",
+    "evaluate_texture": "evaluate_texture",
 }
 
 SEG_MODELS = {
@@ -278,6 +279,8 @@ class JobManager:
                     "use_naip": opts.get("naip", False),
                     "evaluate_geometry": opts.get("evaluate_geometry", False),
                     "evaluation_dir": str(job_dir / EVALUATION_DIR),
+                    "evaluate_texture": opts.get("evaluate_texture", False),
+                    "texture_evaluation_dir": str(job_dir / TEXTURE_EVALUATION_DIR),
                     "output_path": str(model_path),
                     "image_dir": str(job_dir / "images"),
                     "reporter": log,
@@ -346,6 +349,9 @@ def _summarize(state: Any, job_dir: Path) -> dict[str, Any]:
     evaluation = state.get_metadata("geometry_evaluation", None)
     if evaluation is not None:  # with the option: its headline results, or why not
         result["evaluation"] = evaluation
+    texture = state.get_metadata("texture_evaluation", None)
+    if texture is not None:  # the same for the texture evaluation
+        result["texture_evaluation"] = texture
     model_path = job_dir / "model.glb"
     if model_path.exists():
         result["model_bytes"] = model_path.stat().st_size

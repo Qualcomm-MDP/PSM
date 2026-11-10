@@ -25,6 +25,8 @@ poetry run uvicorn api.app:create_app --factory --app-dir src
 | GET    | `/api/jobs/{id}/profile.json`      | The full profiler report of a job run with `profile` (updated after each stage while it runs). `?download=true` sends it as a file. `404` without a profile. |
 | GET    | `/api/jobs/{id}/evaluation`        | The geometry evaluation's results of a job run with `evaluate_geometry` (`result.evaluation`). `404` without one. |
 | GET    | `/api/jobs/{id}/evaluation/{name}` | One file the evaluation wrote: `summary.md`, `summary.json`, `per_building.csv`, `per_building_errors.geojson`, the charts `01_scorecard.png` to `05_height_error_map.png`, `buildings_footprints_utm.geojson` or `osm_buildings.json`. `?download=true` sends it as a file. `404` for any other name. |
+| GET    | `/api/jobs/{id}/texture-evaluation`        | The texture evaluation's results of a job run with `evaluate_texture` (`result.texture_evaluation`). `404` without one. |
+| GET    | `/api/jobs/{id}/texture-evaluation/{name}` | One file the texture evaluation wrote: `summary.md`, `summary.json`, `per_group.csv`, or the charts `01_scorecard.png`, `02_coverage.png` and `03_stretch.png`. `?download=true` sends it as a file. `404` for any other name. |
 | GET    | `/api/jobs/{id}/images`            | The saved photo previews: `{"images": [{"id", "heading", "original", "cleaned"}]}` (URLs).      |
 | GET    | `/api/jobs/{id}/images/{name}`     | One preview image (JPEG).                                                                        |
 
@@ -42,7 +44,8 @@ poetry run uvicorn api.app:create_app --factory --app-dir src
   "terrain": false,
   "naip": false,
   "profile": false,
-  "evaluate_geometry": false
+  "evaluate_geometry": false,
+  "evaluate_texture": false
 }
 ```
 
@@ -57,6 +60,7 @@ poetry run uvicorn api.app:create_app --factory --app-dir src
 | `naip`                | `false`         | the `--naip` stage; turns `terrain` on                                   |
 | `profile`             | `false`         | measure each stage (the CLI's `--profile`): `job.profile` and `/profile.json` |
 | `evaluate_geometry`   | `false`         | compare the model with USGS LiDAR after export (the CLI's `--evaluate-geometry`): `result.evaluation` and `/evaluation` |
+| `evaluate_texture`    | `false`         | score the buildings' UV texture after export (the CLI's `--evaluate-texture`): `result.texture_evaluation` and `/texture-evaluation` |
 
 Invalid requests get `422` with a message in `detail`.
 
@@ -93,6 +97,23 @@ Invalid requests get `422` with a message in `detail`.
   | `buildings` | `total` OSM buildings, `evaluated`, and `by_status` (`ok`, `not_in_mesh`, `not_in_lidar`, `too_small`, `no_ground`, ...)            |
   | `lidar`     | the LiDAR used: `source`, `url`, `vertical`                                                                                          |
   | `files`     | the files written, for `/evaluation/{name}`                                                                                          |
+- `result.texture_evaluation`, for a job run with `evaluate_texture`: `{"status": "unavailable" | "failed", "reason": ...}` when it couldn't run or failed (the job is still `done`), otherwise (see [Evaluation](../pipeline/evaluation.md#texture-quality-uv-mapping)):
+
+  | Field          | Meaning                                                                                                     |
+  | -------------- | ----------------------------------------------------------------------------------------------------------- |
+  | `status`       | `"done"`                                                                                                    |
+  | `confidence`   | 1 − (α·O + β·D + γ·F), from 0 to 1                                                                          |
+  | `partial`      | `true` when F was left out (Inception-v3 not available); the confidence then uses O and D reweighted        |
+  | `terms`        | `O`, `D` and `F`, each from 0 (best) to 1, or `null` when not available                                     |
+  | `o_texels`     | O counted in texels, as the paper does (`terms.O` is by surface area)                                       |
+  | `fid`, `fid_reason`, `tau` | the FID behind F (or why it's missing) and the scale τ it was mapped with                       |
+  | `weights`, `weights_used`  | α, β, γ as `O`, `D`, `F`, and the weights the confidence used (renormalised when partial)       |
+  | `s_max`        | the stretch above which a triangle counts as distorted                                                      |
+  | `reference`, `mask_source` | what the FID compared with, and where the photo-texel mask came from (`texturing`, `colour` or `given`) |
+  | `counts`       | triangles: `faces`, `no_chart` (untextured), `zero_area`, `zero_uv_area`, `distorted`                        |
+  | `groups`, `worst` | the number of building groups, and up to 5 with the most missing texture (`group`, `area_m2`, `x_m`, `y_m`, `obstruction`, `distortion`) |
+  | `seconds`      | how long it took                                                                                            |
+  | `files`        | the files written, for `/texture-evaluation/{name}`                                                         |
 - `profile`: `null` unless the job was started with `profile`. Otherwise it's updated (and pushed over the WebSocket as a `job` message) when each stage starts and ends, and kept when the job fails:
 
   | Field               | Meaning                                                                    |

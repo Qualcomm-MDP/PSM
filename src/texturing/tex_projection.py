@@ -18,7 +18,7 @@ from common.reporter import Reporter, get_reporter
 from naip.naip import roof_faces, roof_patches
 from data_ingest.pano import PANO_TYPES, crop_view
 from texturing.blend import bake_walls
-from segmentation import build_obstruction_mask, remove_obstructions
+from segmentation import build_obstruction_mask, synthesize_texture
 from segmentation.model import LabelCache, model_id_or_default
 
 CAMERA_HEIGHT_M = 1.6
@@ -146,6 +146,7 @@ def apply_textures(
     seg_labels: LabelCache | None = None,
     fill_obstructions: bool = True,
     texture_mode: str = "blend",
+    photo_mask: dict | None = None,
 ) -> trimesh.Trimesh:
     """Project street photos onto the mesh.
 
@@ -171,6 +172,11 @@ def apply_textures(
     fill_obstructions they are painted over (LaMa); without it the photos stay as taken
     and the masks steer which photo textures a face: the most square-on view that the
     obstructions hide least.
+
+    If photo_mask (a dict) is given, photo_mask["mask"] is set to the atlas's texels
+    that hold photo texture (uint8, 255 = from a photo; not untextured grey, and not
+    painted over by obstruction removal), the same size as the atlas: the texture
+    evaluation's M_res. The model itself is unchanged.
     """
     # Full-resolution photos are ~12 MP (~36 MB decoded) and an area can have
     # ~1000 of them, so they're kept on disk and loaded one at a time.
@@ -192,6 +198,7 @@ def apply_textures(
             seg_labels,
             fill_obstructions,
             texture_mode,
+            photo_mask,
         )
 
 
@@ -212,6 +219,7 @@ def _apply_textures(
     seg_labels: LabelCache | None = None,
     fill_obstructions: bool = True,
     texture_mode: str = "blend",
+    photo_mask: dict | None = None,
 ) -> trimesh.Trimesh:
     center_lon = (bbox.min_lon + bbox.max_lon) / 2
     center_lat = (bbox.min_lat + bbox.max_lat) / 2
@@ -314,24 +322,23 @@ def _apply_textures(
                 if seg is not None:
                     labels = (seg, cached_labels)
                     reused["class maps"] += 1
+            mask = build_obstruction_mask(img, seg_model, seg_device, reporter, labels)
             if fill_obstructions:
-                img = remove_obstructions(img, seg_model, seg_device, reporter, labels)
-            else:
-                mask = build_obstruction_mask(
-                    img, seg_model, seg_device, reporter, labels
-                )
-                small_mask = cv2.resize(
-                    mask,
-                    (
-                        max(1, mask.shape[1] // MASK_SCALE),
-                        max(1, mask.shape[0] // MASK_SCALE),
-                    ),
-                    interpolation=cv2.INTER_AREA,
-                )
-                if preview_dir is not None:
-                    shaded = img.copy()
-                    shaded[mask > 0] = (0.4 * shaded[mask > 0]).astype(np.uint8)
-                    img_for_preview = shaded
+                img = synthesize_texture(img, mask, reporter, seg_device)
+            # kept small: which pixels are obstructions (scores the views without fill;
+            # with fill, what was painted over, for the texture evaluation's mask)
+            small_mask = cv2.resize(
+                mask,
+                (
+                    max(1, mask.shape[1] // MASK_SCALE),
+                    max(1, mask.shape[0] // MASK_SCALE),
+                ),
+                interpolation=cv2.INTER_AREA,
+            )
+            if not fill_obstructions and preview_dir is not None:
+                shaded = img.copy()
+                shaded[mask > 0] = (0.4 * shaded[mask > 0]).astype(np.uint8)
+                img_for_preview = shaded
             if preview_dir is not None:
                 _save_preview(
                     img if fill_obstructions else img_for_preview,
@@ -368,6 +375,7 @@ def _apply_textures(
                 "K": _build_K(meta["focal_length_pixels"], w, h),
                 "R": _build_R(meta),
                 "mask": small_mask if remove_obs and not fill_obstructions else None,
+                "filled": small_mask if remove_obs and fill_obstructions else None,
                 # an aligned camera's height is above the road under it, so on terrain
                 # it goes on top of the ground there, like the default height
                 "Cw": camera_position(x, y, terrain, meta.get("camera_height_m")),
@@ -530,6 +538,33 @@ def _apply_textures(
                 borderMode=cv2.BORDER_REPLICATE,
             )
             patch_rgb = cv2.cvtColor(patch_bgr, cv2.COLOR_BGR2RGB)
+            # photo texels: inside the photo (the border is replicated), not painted over
+            ih, iw = int(cd["h"]), int(cd["w"])  # the photo K was made for
+            valid = (
+                cv2.warpPerspective(
+                    np.full((ih, iw), 255, np.uint8),
+                    H_atlas,
+                    (patch_w, patch_h),
+                    flags=cv2.WARP_INVERSE_MAP | cv2.INTER_NEAREST,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=0,
+                )
+                > 127
+            )
+            if cd.get("filled") is not None:
+                fh, fw = cd["filled"].shape
+                to_mask = np.diag([fw / iw, fh / ih, 1.0])
+                valid &= (
+                    cv2.warpPerspective(
+                        cd["filled"],
+                        to_mask @ H_atlas,
+                        (patch_w, patch_h),
+                        flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR,
+                        borderMode=cv2.BORDER_CONSTANT,
+                        borderValue=0,
+                    )
+                    < 128
+                )
 
             def to_px(s, t, _ds=ds, _dt=dt, _s_min=s_min, _t_max=t_max):
                 return (s - _s_min) / _ds, (_t_max - t) / _dt
@@ -543,6 +578,7 @@ def _apply_textures(
                     "v0_px": to_px(0.0, 0.0),
                     "v1_px": to_px(v1_s, v1_t),
                     "v2_px": to_px(v2_s, v2_t),
+                    "valid": valid,
                 }
             )
 
@@ -566,8 +602,15 @@ def _apply_textures(
     GRAY_H = 16
     atlas_h = photo_h + GRAY_H
     atlas = np.full((atlas_h, ATLAS_W, 3), UNTEXTURED_GREY, dtype=np.uint8)
+    from_photo = np.zeros((atlas_h, ATLAS_W), dtype=np.uint8)
     for p in patch_records:
         atlas[p["ay"] : p["ay"] + p["ph"], p["ax"] : p["ax"] + p["pw"]] = p["patch"]
+        # aerial roof patches (no "valid") are photo texture throughout
+        from_photo[p["ay"] : p["ay"] + p["ph"], p["ax"] : p["ax"] + p["pw"]] = (
+            255 if p.get("valid") is None else np.where(p["valid"], 255, 0)
+        )
+    if photo_mask is not None:
+        photo_mask["mask"] = from_photo
 
     DEFAULT_U = 0.5
     DEFAULT_V = 1.0 - (photo_h + GRAY_H / 2) / atlas_h
@@ -603,6 +646,7 @@ def tex_projection(value, state: PipelineState):
         with open(dump_path, "w") as f:
             json.dump(mapillary_data, f, indent=2)
     bbox = state.require_metadata("bbox")
+    photo_mask: dict = {}
     mesh = apply_textures(
         value,
         mapillary_data,
@@ -618,6 +662,9 @@ def tex_projection(value, state: PipelineState):
         reporter=get_reporter(state),
         image_store=state.get_metadata("image_store", None),
         seg_labels=state.get_metadata("segmentation_labels", None),
+        photo_mask=photo_mask,
     )
+    if "mask" in photo_mask:  # saved next to the .glb by the export
+        state.set_metadata("texture_photo_mask", photo_mask["mask"])
     state.require_metadata("progress_monitor").next()
     return mesh

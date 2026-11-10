@@ -27,7 +27,12 @@ from api.live import OVERFLOW, JobHub
 from api.settings import Settings, check_token
 from common import PipelineChain
 from common.env import load_app_env
-from evaluation import EVALUATION_DIR, OUTPUT_FILES
+from evaluation import (
+    EVALUATION_DIR,
+    OUTPUT_FILES,
+    TEXTURE_EVALUATION_DIR,
+    TEXTURE_OUTPUT_FILES,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WEB_DIR = REPO_ROOT / "web"
@@ -92,7 +97,7 @@ class TokenTest(BaseModel):
     token: str | None = Field(default=None, max_length=500)
 
 
-# What the geometry evaluation's files are served as
+# What the evaluations' files are served as
 EVALUATION_TYPES = {
     ".md": "text/markdown; charset=utf-8",
     ".png": "image/png",
@@ -123,6 +128,8 @@ class JobRequest(BaseModel):
     profile: bool = False
     # Same as the CLI's --evaluate-geometry: compare the model with USGS LiDAR (US only)
     evaluate_geometry: bool = False
+    # Same as the CLI's --evaluate-texture: score the buildings' UV texture
+    evaluate_texture: bool = False
 
 
 def _default_pipeline() -> PipelineChain:
@@ -312,6 +319,7 @@ def create_app(
                 "naip": req.naip,
                 "profile": req.profile,
                 "evaluate_geometry": req.evaluate_geometry,
+                "evaluate_texture": req.evaluate_texture,
             },
         )
         return job.to_dict()
@@ -367,6 +375,30 @@ def create_app(
             path,
             media_type=EVALUATION_TYPES.get(path.suffix, "application/octet-stream"),
             filename=f"psm-{job.id}-{name}" if download else None,
+        )
+
+    @app.get("/api/jobs/{job_id}/texture-evaluation")
+    def get_texture_evaluation(job_id: str) -> dict[str, Any]:
+        """The texture evaluation's headline results (result.texture_evaluation)."""
+        job = _job_or_404(job_id)
+        evaluation = (job.result or {}).get("texture_evaluation")
+        if evaluation is None:
+            raise HTTPException(404, "This job has no texture evaluation.")
+        return evaluation
+
+    @app.get("/api/jobs/{job_id}/texture-evaluation/{name}")
+    def get_texture_evaluation_file(
+        job_id: str, name: str, download: bool = False
+    ) -> FileResponse:
+        """One file the texture evaluation wrote (evaluation.TEXTURE_OUTPUT_FILES)."""
+        job = _job_or_404(job_id)
+        path = jobs.job_dir(job.id) / TEXTURE_EVALUATION_DIR / name
+        if name not in TEXTURE_OUTPUT_FILES or not path.is_file():
+            raise HTTPException(404, "No such texture evaluation file.")
+        return FileResponse(
+            path,
+            media_type=EVALUATION_TYPES.get(path.suffix, "application/octet-stream"),
+            filename=f"psm-{job.id}-texture-{name}" if download else None,
         )
 
     @app.get("/api/jobs/{job_id}/overlays.json")

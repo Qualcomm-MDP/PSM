@@ -9,13 +9,18 @@ from pathlib import Path
 
 import numpy as np
 import trimesh
+from PIL import Image
 
 from common import PipelineChain, export_to_glb
 from common.MeshUtils import _get_utm_transformer
 from common.overlays import build_overlays
 from common.reporter import get_reporter
 from data_ingest.ingest import ingest_data
-from evaluation import evaluate_geometry_stage
+from evaluation import (
+    TEXTURE_MASK_SUFFIX,
+    evaluate_geometry_stage,
+    evaluate_texture_stage,
+)
 from mesh_builder.extrude import build_mesh
 from naip import naip_stage
 from pose_alignment.align_poses import align_poses
@@ -70,6 +75,12 @@ def export_mesh(value, state):
         state.set_metadata("output_path", path)  # the chosen file, for later stages
         export_to_glb(value, path)
         get_reporter(state).info(f"Saved mesh to {path}")
+        # which atlas texels hold photo texture (texturing), for the texture evaluation
+        photo_mask = state.get_metadata("texture_photo_mask", None)
+        if photo_mask is not None:
+            Image.fromarray(photo_mask).save(
+                Path(path).with_name(Path(path).stem + TEXTURE_MASK_SUFFIX)
+            )
         # the cameras and the alignment's point cloud on the model, for viewers
         overlays = build_overlays(
             state.get_metadata("camera_poses", None),
@@ -130,5 +141,11 @@ def build_pipeline() -> PipelineChain:
         evaluate_geometry_stage,
         label="Evaluate geometry",
         detail="Compare with USGS LiDAR (when enabled)",
+    )
+    pipeline.add_stage(
+        "evaluate_texture",
+        evaluate_texture_stage,
+        label="Evaluating texture",
+        detail="UV texture quality score (when enabled)",
     )
     return pipeline

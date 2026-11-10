@@ -93,9 +93,12 @@ def _wall_frames(verts_proj, faces, normals, skip):
 def bake_walls(
     verts_proj, faces, normals, cam_data, skip, reporter, grey=225
 ) -> tuple[list[dict], dict]:
-    """Patches (texturing's patch records: fi, patch RGB, pw, ph, v0_px..v2_px) of every
-    wall triangle a photo sees, and stats. cam_data: texturing's cameras (img_path, w, h,
-    K, R world-to-camera, Cw, mask: a small obstruction mask or None)."""
+    """Patches (texturing's patch records: fi, patch RGB, pw, ph, v0_px..v2_px, valid) of
+    every wall triangle a photo sees, and stats. cam_data: texturing's cameras (img_path,
+    w, h, K, R world-to-camera, Cw, mask: a small obstruction mask or None, filled: a
+    small mask of what obstruction removal painted over, or None). A patch's "valid"
+    marks the texels that hold photo texture: seen by a photo, and mostly not painted
+    over (the texture evaluation's M_res)."""
     frames, A, B = _wall_frames(verts_proj, faces, normals, skip)
     if not frames:
         return [], {"walls": 0}
@@ -104,6 +107,7 @@ def bake_walls(
     outward = np.array([frames[f]["n"] for f in fis])
     acc: dict[int, np.ndarray] = {}
     wsum: dict[int, np.ndarray] = {}
+    wfill: dict[int, np.ndarray] = {}  # weight of painted-over (inpainted) pixels
     lo_ab, hi_ab = np.minimum(A, B), np.maximum(A, B)
 
     for cd in reporter.progress(cam_data, desc="Blending photos onto walls"):
@@ -130,6 +134,7 @@ def bake_walls(
         fx, fy, cx, cy = K[0, 0] * sx, K[1, 1] * sy, K[0, 2] * sx, K[1, 2] * sy
         R = np.asarray(cd["R"], float)
         mask = cd.get("mask")
+        filled = cd.get("filled")
         for fi in fis[near]:
             fr = frames[int(fi)]
             colxy, z = fr["colxy"], fr["z"]
@@ -186,8 +191,21 @@ def bake_walls(
             if int(fi) not in acc:
                 acc[int(fi)] = np.zeros((H, W, 3), np.float32)
                 wsum[int(fi)] = np.zeros((H, W), np.float32)
+                wfill[int(fi)] = np.zeros((H, W), np.float32)
             acc[int(fi)] += col * w[..., None]
             wsum[int(fi)] += w
+            if filled is not None:
+                fu = np.clip(
+                    (u * filled.shape[1] / img.shape[1]).astype(int),
+                    0,
+                    filled.shape[1] - 1,
+                )
+                fv = np.clip(
+                    (v * filled.shape[0] / img.shape[0]).astype(int),
+                    0,
+                    filled.shape[0] - 1,
+                )
+                wfill[int(fi)] += w * (filled[fv, fu] / 255.0).astype(np.float32)
 
     patches, seen, total = [], 0, 0
     for fi, a in acc.items():
@@ -195,6 +213,9 @@ def bake_walls(
         has = ws > 1e-30
         tex = np.full(a.shape, grey, np.uint8)
         tex[has] = np.clip(a[has] / ws[has][:, None], 0, 255).astype(np.uint8)
+        # a texel is photo texture when photos saw it and less than half its weight came
+        # from pixels obstruction removal painted over
+        valid = has & (wfill[fi] < 0.5 * ws)
         seen += int(has.sum())
         total += has.size
 
@@ -208,6 +229,7 @@ def bake_walls(
                 "pw": fr["W"],
                 "ph": fr["H"],
                 **{f"v{j}_px": to_px(fr["vs"][j], fr["vt"][j]) for j in range(3)},
+                "valid": valid,
             }
         )
     return patches, {

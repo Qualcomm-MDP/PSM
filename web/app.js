@@ -877,8 +877,8 @@ function renderJobs() {
       const chip =
         statusChip(j.status) +
         (j.options?.profile ? ` <span class="chip" title="Run with Profile this run: open it to see the profile">Profiled</span>` : "") +
-        (j.options?.evaluate_geometry
-          ? ` <span class="chip" title="Run with Evaluate geometry against LiDAR: open it to see the evaluation">Evaluated</span>`
+        (j.options?.evaluate_geometry || j.options?.evaluate_texture
+          ? ` <span class="chip" title="Run with an evaluation (geometry or texture): open it to see the results">Evaluated</span>`
           : "");
       const thumb = j.result?.thumbnail
         ? `<img class="thumb" src="/api/jobs/${esc(j.id)}/images/${esc(j.result.thumbnail)}" alt="">`
@@ -1015,6 +1015,7 @@ function jobFactsHtml(job) {
   if ("naip" in o) rows.push(["Aerial photos", o.naip ? "NAIP ground and roofs" : "Off"]);
   if ("profile" in o) rows.push(["Profile", o.profile ? "On" : "Off"]);
   if ("evaluate_geometry" in o) rows.push(["LiDAR evaluation", o.evaluate_geometry ? "On" : "Off"]);
+  if ("evaluate_texture" in o) rows.push(["Texture evaluation", o.evaluate_texture ? "On" : "Off"]);
   if (job.result?.photos != null) rows.push(["Photos", `<span class="mono">${job.result.photos}</span>`]);
   if (job.result?.aligned_photos != null)
     rows.push(["Aligned photos", `<span class="mono">${job.result.aligned_photos}</span>`]);
@@ -1290,8 +1291,16 @@ const VERDICT = {
 };
 const evalReport = new Map(); // job id -> summary.md text, once loaded
 
+// The Evaluation section holds a Geometry and a Texture subsection, each shown when the
+// job ran (or is running) that evaluation.
 function renderJobEvaluation(job) {
-  const el = $("jobEvaluation");
+  renderGeometryEvaluation(job);
+  renderTextureEvaluation(job);
+  $("jobEvaluation").hidden = $("jobEvalGeometry").hidden && $("jobEvalTexture").hidden;
+}
+
+function renderGeometryEvaluation(job) {
+  const el = $("jobEvalGeometry");
   const ev = jobEvaluation(job);
   if (!job?.options?.evaluate_geometry && !ev) {
     el.hidden = true;
@@ -1308,7 +1317,7 @@ function renderJobEvaluation(job) {
 
   const head = (note, actions = "") => `
     <div class="prof-head">
-      <div><h3 id="jobEvaluationTitle">Evaluation</h3><span class="prof-note" role="status">${esc(note)}</span></div>
+      <div><h4>Geometry · LiDAR</h4><span class="prof-note" role="status">${esc(note)}</span></div>
       ${actions}
     </div>`;
 
@@ -1426,19 +1435,166 @@ function renderJobEvaluation(job) {
   });
 }
 
-async function showEvalReport(job, box) {
-  if (!evalReport.has(job.id)) {
+// ---------- Texture evaluation (jobs run with "Evaluate texture quality") ----------
+// job.result.texture_evaluation is src/evaluation/texture_uv.py's web_summary once the
+// job ends, or {status: "unavailable" | "failed", reason}. Its files come from
+// /api/jobs/<id>/texture-evaluation/<name>.
+const textureEvaluation = (job) => job?.result?.texture_evaluation || null;
+const TEX_CHARTS = {
+  "01_scorecard.png": "Scorecard: the three penalties and the confidence",
+  "02_coverage.png": "The texture atlas, with the texels that should hold photo texture and don't in red",
+  "03_stretch.png": "How stretched the texture is, by share of the surface",
+};
+const TEX_DOWNLOADS = {
+  "summary.md": "Report (.md)",
+  "per_group.csv": "Per building group (.csv)",
+  "summary.json": "Summary (.json)",
+};
+const texFile = (job, name, download = false) =>
+  `/api/jobs/${encodeURIComponent(job.id)}/texture-evaluation/${encodeURIComponent(name)}${download ? "?download=true" : ""}`;
+const texReport = new Map(); // job id -> summary.md text, once loaded
+const num = (v, d = 2) => (v == null || !Number.isFinite(v) ? "—" : v.toFixed(d));
+
+function renderTextureEvaluation(job) {
+  const el = $("jobEvalTexture");
+  const ev = textureEvaluation(job);
+  if (!job?.options?.evaluate_texture && !ev) {
+    el.hidden = true;
+    el.replaceChildren();
+    delete el.dataset.key;
+    return;
+  }
+  const stage = job.stages?.evaluate_texture;
+  const key = JSON.stringify([job.id, job.status, stage, ev?.status, ev?.files]);
+  if (el.dataset.key === key) return;
+  el.dataset.key = key;
+  el.hidden = false;
+
+  const head = (note, actions = "") => `
+    <div class="prof-head">
+      <div><h4>Texture · UV quality</h4><span class="prof-note" role="status">${esc(note)}</span></div>
+      ${actions}
+    </div>`;
+
+  if (!ev) {
+    let note;
+    if (job.status === "queued") note = "Waiting to start";
+    else if (stage === "running")
+      note = "Scoring the texture… its progress is in the pipeline log (Inception-v3 on a CPU takes a few minutes)";
+    else if (isActive(job)) note = "Runs after the model is exported";
+    else if (job.status === "failed") note = "Not run: the job failed before the model was exported";
+    else note = "No texture evaluation was recorded for this job";
+    el.innerHTML = head(note) + (isActive(job) ? `<p class="prof-empty">The results appear here when the job finishes.</p>` : "");
+    return;
+  }
+  if (ev.status !== "done") {
+    const what = ev.status === "unavailable" ? "Not available here" : "The evaluation failed";
+    el.innerHTML =
+      head(what) +
+      `<p class="eval-reason"><strong>${ev.status === "unavailable" ? "ⓘ" : "⚠"} ${esc(what)}:</strong> ${esc(ev.reason || "no reason given")}. The model itself is fine.</p>`;
+    return;
+  }
+
+  const files = new Set(ev.files || []);
+  const t = ev.terms || {};
+  const w = ev.weights_used || {};
+  const c = ev.counts || {};
+  const downloads = Object.entries(TEX_DOWNLOADS)
+    .filter(([name]) => files.has(name))
+    .map(([name, label]) => `<a class="btn small" href="${texFile(job, name, true)}">${esc(label)}</a>`)
+    .join("");
+  const formula = Object.keys(w)
+    .map((k) => `${num(w[k])}·${k}`)
+    .join(" + ");
+  const verdict = `<div class="eval-verdict">
+      <span class="chip ${ev.partial ? "" : "ok"}">${
+        ev.partial ? `<span aria-hidden="true">◐</span> Partial score` : `<span aria-hidden="true">●</span> Full score`
+      }</span>
+      <span>${
+        ev.partial
+          ? `F (realism) left out: ${esc(ev.fid_reason || "not available")}. O and D are reweighted to sum to 1.`
+          : "All three terms measured."
+      }</span>
+    </div>`;
+  const tile = (label, value, sub) =>
+    `<div class="prof-tile"><span class="prof-tile-label">${label}</span><span class="prof-tile-value">${value}</span>${sub ? `<span class="prof-tile-sub">${sub}</span>` : ""}</div>`;
+  const tiles = [
+    tile("Confidence", num(ev.confidence), `1 − (${esc(formula)}) · 1 is perfect`),
+    tile("O · without photo texture", pct(t.O), "share of the surface; lower is better"),
+    tile("D · stretched texture", pct(t.D), `beyond ${esc(String(ev.s_max ?? 1.5))}× stretch; lower is better`),
+    tile(
+      "F · realism penalty",
+      t.F == null ? "—" : num(t.F),
+      t.F == null ? "not available" : `FID ${num(ev.fid, 1)} · τ ${esc(String(ev.tau))}; lower is better`,
+    ),
+  ].join("");
+  const explain = `<ul class="eval-explain">
+      <li><strong>O</strong> how much of the buildings' surface has no texture from a street photo (never seen, or painted over where obstructions were removed).</li>
+      <li><strong>D</strong> how much of the surface has its texture stretched more one way than the other (σ1/σ2 above ${esc(String(ev.s_max ?? 1.5))}).</li>
+      <li><strong>F</strong> how unlike real photos the texture looks: 1 − exp(−FID/τ), from Inception-v3 features compared with ${esc(String(ev.reference || "the street photos"))}. τ is a starting value until it is calibrated.</li>
+    </ul>`;
+  const worst = (ev.worst || [])
+    .map(
+      (r) => `<tr><td>${esc(String(r.group))}</td><td class="num">${Math.round(r.area_m2)} m²</td>
+        <td class="num">${r.x_m >= 0 ? "+" : "−"}${Math.abs(Math.round(r.x_m))} E, ${r.y_m >= 0 ? "+" : "−"}${Math.abs(Math.round(r.y_m))} N</td>
+        <td class="num">${pct(r.obstruction)}</td><td class="num">${pct(r.distortion)}</td></tr>`,
+    )
+    .join("");
+  const notes = [
+    c.no_chart ? `${c.no_chart.toLocaleString()} of ${(c.faces ?? 0).toLocaleString()} triangles have no texture` : "",
+    c.zero_uv_area ? `${c.zero_uv_area.toLocaleString()} with a collapsed chart (counted as stretched)` : "",
+    ev.mask_source === "colour" ? "photo texels taken from colour (no texturing mask was saved for this model)" : "",
+  ].filter(Boolean);
+  const charts = Object.entries(TEX_CHARTS)
+    .filter(([name]) => files.has(name))
+    .map(
+      ([name, alt]) => `<figure class="eval-chart"><a href="${texFile(job, name)}" target="_blank" rel="noopener" title="Open full size">
+        <img src="${texFile(job, name)}" alt="${esc(alt)}" loading="lazy"></a><figcaption>${esc(alt)}</figcaption></figure>`,
+    )
+    .join("");
+  const took = ev.seconds != null ? ` · ${num(ev.seconds, 0)} s` : "";
+
+  el.innerHTML = `
+    ${head(`${ev.groups ?? 0} building groups${took}`, downloads ? `<div class="eval-actions">${downloads}</div>` : "")}
+    ${verdict}
+    <div class="prof-tiles">${tiles}</div>
+    ${explain}
+    ${
+      worst
+        ? `<div class="prof-table-wrap"><table class="prof-table eval-table">
+      <caption>Building groups with the most missing texture</caption>
+      <thead><tr><th>Group</th><th class="num">Area</th><th class="num">From the centre</th><th class="num">O</th><th class="num">D</th></tr></thead>
+      <tbody>${worst}</tbody>
+    </table></div>`
+        : ""
+    }
+    ${notes.length ? `<p class="prof-note">${esc(notes.join(" · "))}</p>` : ""}
+    ${charts ? `<div class="eval-charts">${charts}</div>` : ""}
+    ${files.has("summary.md") ? `<details class="prof-details eval-report"><summary>Full report</summary><div class="eval-md"></div></details>` : ""}`;
+
+  const details = el.querySelector(".eval-report");
+  details?.addEventListener("toggle", () => {
+    if (details.open) showReport(texReport, job, texFile(job, "summary.md"), details.querySelector(".eval-md"));
+  });
+}
+
+async function showReport(cache, job, url, box) {
+  if (!cache.has(job.id)) {
     box.textContent = "Loading…";
     try {
-      const r = await fetch(evalFile(job, "summary.md"));
+      const r = await fetch(url);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      evalReport.set(job.id, await r.text());
+      cache.set(job.id, await r.text());
     } catch (e) {
       box.textContent = `Couldn't load the report (${e.message}).`;
       return;
     }
   }
-  renderMarkdown(evalReport.get(job.id), box);
+  renderMarkdown(cache.get(job.id), box);
+}
+
+function showEvalReport(job, box) {
+  return showReport(evalReport, job, evalFile(job, "summary.md"), box);
 }
 
 // A small, safe Markdown reader for the report: headings, lists, tables and
@@ -1509,7 +1665,12 @@ function renderMarkdown(md, box) {
 // "View evaluation" on the main page opens the current job's details at its evaluation.
 function renderEvaluationButton() {
   const job = state.current;
-  $("viewEvaluation").hidden = !(job?.options?.evaluate_geometry || jobEvaluation(job));
+  $("viewEvaluation").hidden = !(
+    job?.options?.evaluate_geometry ||
+    job?.options?.evaluate_texture ||
+    jobEvaluation(job) ||
+    textureEvaluation(job)
+  );
 }
 $("viewEvaluation").addEventListener("click", () => {
   const job = state.current;
@@ -1985,6 +2146,7 @@ $("go").addEventListener("click", async () => {
         naip: $("naip").checked,
         profile: $("profile").checked,
         evaluate_geometry: $("evaluate").checked,
+        evaluate_texture: $("evaluateTexture").checked,
       }),
     });
     // The socket often delivers newer updates for this job (running, first

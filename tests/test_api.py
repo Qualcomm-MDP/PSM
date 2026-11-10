@@ -210,6 +210,7 @@ def test_real_pipeline_stages_drive_the_timeline():
         "texturing",
         "export",
         "evaluate_geometry",
+        "evaluate_texture",
     ]
 
 
@@ -707,4 +708,128 @@ def test_an_unavailable_evaluation_keeps_the_job_done(tmp_path):
     )
     assert job["status"] == "done"
     assert job["result"]["evaluation"] == {"status": "unavailable", "reason": reason}
+    assert client.get(f"/api/jobs/{job['id']}/model.glb").status_code == 200
+
+
+# ---- the texture evaluation (evaluate_texture) ----
+
+
+def texture_pipeline(result, seen=None):
+    """fetch + export + both evaluation stages; the texture one writes like the real one."""
+
+    def evaluate_geometry(value, state):
+        return value
+
+    def evaluate_texture(value, state):
+        if seen is not None:
+            seen.update(state.metadata)
+        if not state.get_metadata("evaluate_texture", False):
+            return value
+        get_reporter(state).info("[texture] O (obstruction) 0.250")
+        out = Path(state.metadata["texture_evaluation_dir"])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "summary.md").write_bytes(b"# UV texture quality\n")
+        (out / "02_coverage.png").write_bytes(b"png")
+        (out / "scratch.npz").write_bytes(b"not an output")
+        state.set_metadata("texture_evaluation", result)
+        return value
+
+    def factory():
+        pipeline = fake_pipeline()
+        pipeline.add_stage("evaluate_geometry", evaluate_geometry, label="Geometry")
+        pipeline.add_stage("evaluate_texture", evaluate_texture, label="Texture")
+        return pipeline
+
+    return factory
+
+
+TEXTURE_DONE = {
+    "status": "done",
+    "confidence": 0.71,
+    "partial": False,
+    "terms": {"O": 0.25, "D": 0.0, "F": 0.5},
+    "files": ["summary.md", "02_coverage.png"],
+}
+
+
+def test_texture_evaluation_is_off_by_default_and_skipped(tmp_path):
+    seen = {}
+    client = make_client(tmp_path, texture_pipeline(TEXTURE_DONE, seen))
+    created = client.post("/api/jobs", json={"bbox": BBOX}).json()
+    assert created["options"]["evaluate_texture"] is False
+    job = wait_for(client, created["id"])
+
+    assert job["status"] == "done"
+    assert job["stages"]["evaluate_texture"] == "skipped"
+    assert seen["evaluate_texture"] is False
+    assert "texture_evaluation" not in job["result"]
+    base = f"/api/jobs/{job['id']}/texture-evaluation"
+    assert client.get(base).status_code == 404
+    assert client.get(f"{base}/summary.md").status_code == 404
+
+
+def test_texture_evaluation_results_and_files_are_served(tmp_path):
+    seen = {}
+    client = make_client(tmp_path, texture_pipeline(TEXTURE_DONE, seen))
+    created = client.post(
+        "/api/jobs", json={"bbox": BBOX, "evaluate_texture": True, "profile": True}
+    ).json()
+    job = wait_for(client, created["id"])
+    jid = job["id"]
+
+    assert job["status"] == "done" and job["stages"]["evaluate_texture"] == "done"
+    # the geometry evaluation stays off and its result shape untouched
+    assert job["stages"]["evaluate_geometry"] == "skipped"
+    assert "evaluation" not in job["result"]
+    assert seen["texture_evaluation_dir"] == str(tmp_path / jid / "texture_eval")
+    assert job["result"]["texture_evaluation"] == TEXTURE_DONE
+    base = f"/api/jobs/{jid}/texture-evaluation"
+    assert client.get(base).json() == TEXTURE_DONE
+    log = client.get(f"/api/jobs/{jid}/log").text
+    assert "[texture] O (obstruction) 0.250" in log
+    stages = {s["name"]: s["status"] for s in job["result"]["profile"]["stages"]}
+    assert (
+        stages["evaluate_texture"] == "ok" and stages["evaluate_geometry"] == "skipped"
+    )
+
+    report = client.get(f"{base}/summary.md")
+    assert report.headers["content-type"].startswith("text/markdown")
+    assert report.content == b"# UV texture quality\n"
+    png = client.get(f"{base}/02_coverage.png?download=true")
+    assert png.headers["content-type"] == "image/png"
+    assert f"psm-{jid}-texture-02_coverage.png" in png.headers["content-disposition"]
+
+
+def test_texture_evaluation_serves_only_its_own_files(tmp_path):
+    client = make_client(tmp_path, texture_pipeline(TEXTURE_DONE))
+    jid = wait_for(
+        client,
+        client.post("/api/jobs", json={"bbox": BBOX, "evaluate_texture": True}).json()[
+            "id"
+        ],
+    )["id"]
+    base = f"/api/jobs/{jid}/texture-evaluation"
+    assert client.get(f"{base}/scratch.npz").status_code == 404  # not an output
+    assert (
+        client.get(f"{base}/03_stretch.png").status_code == 404
+    )  # listed, not written
+    for name in ("..%2Fjob.json", "%2E%2E%2Fjob.json", "..%2Fmodel.glb"):
+        assert client.get(f"{base}/{name}").status_code == 404
+    # the geometry endpoint doesn't serve the texture evaluation's files, nor vice versa
+    assert client.get(f"/api/jobs/{jid}/evaluation/02_coverage.png").status_code == 404
+
+
+def test_an_unavailable_texture_evaluation_keeps_the_job_done(tmp_path):
+    reason = "model.glb has no textured building mesh to evaluate"
+    client = make_client(
+        tmp_path, texture_pipeline({"status": "unavailable", "reason": reason})
+    )
+    job = wait_for(
+        client,
+        client.post("/api/jobs", json={"bbox": BBOX, "evaluate_texture": True}).json()[
+            "id"
+        ],
+    )
+    assert job["status"] == "done"
+    assert job["result"]["texture_evaluation"]["status"] == "unavailable"
     assert client.get(f"/api/jobs/{job['id']}/model.glb").status_code == 200

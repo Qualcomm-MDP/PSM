@@ -444,6 +444,13 @@ dialog.settings-modal { width: min(560px, calc(100% - 32px)); height: auto; max-
 /* Evaluation (job details): its own section after the profile */
 .job-eval { display: flex; flex-direction: column; gap: 14px; min-width: 0; border-top: 1px solid var(--line); padding-top: 18px; }
 .job-eval .prof-head { flex-wrap: wrap; }
+.eval-title { margin: 0; font: 600 15px/1.2 var(--font-display); }
+/* Geometry and Texture: one subsection each */
+.eval-sub { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.eval-sub + .eval-sub:not([hidden]) { border-top: 1px dashed var(--line); padding-top: 16px; }
+.eval-sub .prof-head h4 { margin: 0 0 2px; font: 600 14px/1.2 var(--font-display); }
+.eval-explain { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.5; color: var(--muted); }
+.eval-explain strong { color: var(--fg); }
 .eval-actions { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
 .eval-verdict { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; font-size: 13px; }
 .eval-verdict .chip { font-size: 12px; }
