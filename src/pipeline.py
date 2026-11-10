@@ -15,6 +15,7 @@ from common.MeshUtils import _get_utm_transformer
 from common.overlays import build_overlays
 from common.reporter import get_reporter
 from data_ingest.ingest import ingest_data
+from evaluation import evaluate_geometry_stage
 from mesh_builder.extrude import build_mesh
 from naip import naip_stage
 from pose_alignment.align_poses import align_poses
@@ -66,6 +67,7 @@ def export_mesh(value, state):
         ask = state.get_metadata("ask_output_path", None)
         path = ask() if ask else None
     if path is not None:
+        state.set_metadata("output_path", path)  # the chosen file, for later stages
         export_to_glb(value, path)
         get_reporter(state).info(f"Saved mesh to {path}")
         # the cameras and the alignment's point cloud on the model, for viewers
@@ -123,4 +125,10 @@ def build_pipeline() -> PipelineChain:
         "texturing", tex_projection, label="Texture", detail="Project street photos"
     )
     pipeline.add_stage("export", export_mesh, label="Export", detail="Write .glb")
+    pipeline.add_stage(
+        "evaluate_geometry",
+        evaluate_geometry_stage,
+        label="Evaluate geometry",
+        detail="Compare with USGS LiDAR (when enabled)",
+    )
     return pipeline

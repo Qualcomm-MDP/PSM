@@ -95,6 +95,13 @@ PAGES = [
             Section("Terrain", objects=["terrain.terrain"]),
             Section("Aerial photos (NAIP)", objects=["naip.naip"]),
             Section("Texturing", objects=["texturing.tex_projection"]),
+            Section(
+                "Geometry evaluation (LiDAR)",
+                objects=[
+                    "evaluation.evaluate_geometry_stage",
+                    "evaluation.evaluate_model",
+                ],
+            ),
             Section("Obstruction removal", objects=["segmentation.obstruction"]),
             Section("Mesh helpers", objects=["common.MeshUtils"]),
             Section("Mesh export", objects=["common.MeshExport"]),
