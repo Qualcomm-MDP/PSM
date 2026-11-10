@@ -201,6 +201,16 @@
         <p class="opt-note" id="evaluateNote" role="status" hidden>
           This area looks outside the US, which USGS LiDAR covers, so the evaluation would have nothing to compare with.
         </p>
+        <div class="opt-row">
+          <div class="text">
+            <strong id="evaluateTextureLabel">Evaluate texture quality</strong>
+            <span id="evaluateTextureHint">Score the buildings' texture after export: how much has no photo, how stretched it is and how real it looks (downloads an Inception model the first time; a GPU is recommended); see it in the job's details</span>
+          </div>
+          <label class="switch" for="evaluateTexture">
+            <input id="evaluateTexture" type="checkbox" aria-labelledby="evaluateTextureLabel" aria-describedby="evaluateTextureHint">
+            <span class="track"></span><span class="knob"></span>
+          </label>
+        </div>
       </section>
     </div>
 
@@ -345,7 +355,11 @@
       </div>
     </div>
     <section class="job-profile" id="jobProfile" aria-labelledby="jobProfileTitle" hidden></section>
-    <section class="job-eval" id="jobEvaluation" aria-labelledby="jobEvaluationTitle" hidden></section>
+    <section class="job-eval" id="jobEvaluation" aria-labelledby="jobEvaluationTitle" hidden>
+      <h3 class="eval-title" id="jobEvaluationTitle">Evaluation</h3>
+      <div class="eval-sub" id="jobEvalGeometry" hidden></div>
+      <div class="eval-sub" id="jobEvalTexture" hidden></div>
+    </section>
     <section class="job-photos" aria-labelledby="jobPhotosTitle">
       <div class="job-photos-head">
         <h3 id="jobPhotosTitle">Street photos</h3>

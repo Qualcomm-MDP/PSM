@@ -9,6 +9,7 @@ from pipeline import build_pipeline
 from pose_alignment.align_poses import POSE_SOURCES
 
 import argparse
+from pathlib import Path
 
 load_app_env()
 
@@ -158,6 +159,13 @@ def main():
         "(US only; needs `poetry install --with eval`). Writes geometry_eval/ next to "
         "the .glb. Off by default.",
     )
+    parser.add_argument(
+        "--evaluate-texture",
+        action="store_true",
+        help="After export, score the buildings' UV texture (obstruction, distortion "
+        "and FID against the street photos; downloads Inception-v3 the first time). "
+        "Writes texture_eval/ next to the .glb. Off by default.",
+    )
     args = parser.parse_args()
 
     if args.bbox is not None:
@@ -183,6 +191,8 @@ def main():
         skip_stages.add("naip")
     if not args.evaluate_geometry:
         skip_stages.add("evaluate_geometry")
+    if not args.evaluate_texture:
+        skip_stages.add("evaluate_texture")
     run_pipeline.run(
         bbox,
         metadata={
@@ -201,6 +211,14 @@ def main():
             "aligned_only": args.aligned_only,
             "alignment_dir": args.alignment_dir,
             "evaluate_geometry": args.evaluate_geometry,
+            "evaluate_texture": args.evaluate_texture,
+            # the texture evaluation's FID compares with street photos: save some next
+            # to the model (images/, as the web app does)
+            "image_dir": (
+                str(Path(args.output).parent / "images")
+                if args.evaluate_texture and args.output
+                else None
+            ),
         },
         profiler=profiler,
         skip_stages=skip_stages,

@@ -186,9 +186,15 @@ def test_texturing_downloads_each_photo_once_in_parallel(monkeypatch):
             for side, yaw in (("right", 90.0), ("left", -90.0))
         },
     }
+    photo_mask: dict = {}
     out = tex_projection.apply_textures(
-        mesh, data, bbox, remove_obs=False, reporter=_Quiet()
+        mesh, data, bbox, remove_obs=False, reporter=_Quiet(), photo_mask=photo_mask
     )
+    # which atlas texels hold photo texture: the atlas's size; the grey strip is not
+    atlas = np.asarray(out.visual.material.baseColorTexture)
+    assert photo_mask["mask"].shape == atlas.shape[:2]
+    assert photo_mask["mask"][-1].max() == 0
+    assert set(np.unique(photo_mask["mask"])) <= {0, 255}
     assert sorted(fetched) == [
         "https://x/pano.jpg",
         "https://x/photo.jpg",

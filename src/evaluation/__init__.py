@@ -2,9 +2,14 @@
 
 geometry_lidar compares the exported model's buildings and terrain with USGS 3DEP
 airborne LiDAR (command line: scripts/eval/eval_geometry_lidar.py). The pipeline runs
-it as its optional last stage, evaluate_geometry, when "evaluate_geometry" is set
+it after export as its optional stage evaluate_geometry, when "evaluate_geometry" is set
 (the web app's "Evaluate geometry against LiDAR" option, the CLI's
 --evaluate-geometry).
+
+texture_uv scores the buildings' UV texture (the "UV Mapping Texture Quality Metric":
+obstruction, distortion and FID; command line: scripts/eval/eval_texture_uv.py). The
+pipeline runs it as its optional last stage, evaluate_texture, when "evaluate_texture"
+is set (the web app's "Evaluate texture quality" option, the CLI's --evaluate-texture).
 """
 
 from __future__ import annotations
@@ -17,6 +22,18 @@ from common.redact import redact
 from common.reporter import CONSOLE, Reporter, get_reporter
 
 EVALUATION_DIR = "geometry_eval"  # next to the .glb, as the command line writes it
+TEXTURE_EVALUATION_DIR = "texture_eval"  # texture_uv.EVALUATION_DIR
+# texture_uv.MASK_SUFFIX: texturing's photo texels, saved next to the .glb by the export
+TEXTURE_MASK_SUFFIX = ".texture_mask.png"
+# texture_uv.OUTPUT_FILES: the texture evaluation's files the web app may serve
+TEXTURE_OUTPUT_FILES = (
+    "summary.md",
+    "01_scorecard.png",
+    "02_coverage.png",
+    "03_stretch.png",
+    "per_group.csv",
+    "summary.json",
+)
 # What run_evaluation writes, in reading order: the files the web app may serve
 # (lidar_points_*.npz, the cached LiDAR, and terrain_grid.npz are not).
 OUTPUT_FILES = (
@@ -86,12 +103,14 @@ def _reason(exc: SystemExit) -> str:
     return str(exc.code if exc.code is not None else "stopped").strip()
 
 
-def _not_run(status: str, reason: str, reporter: Reporter | None) -> dict[str, Any]:
+def _not_run(
+    status: str, reason: str, reporter: Reporter | None, name: str = "Geometry"
+) -> dict[str, Any]:
     reason = redact(reason)
     if len(reason) > 400:
         reason = reason[:397] + "..."
     what = "not available" if status == "unavailable" else "failed"
-    message = f"Geometry evaluation {what}: {reason}. The model is kept."
+    message = f"{name} evaluation {what}: {reason}. The model is kept."
     if reporter is not None:
         reporter.warning(message)
     else:
@@ -125,4 +144,66 @@ def evaluate_geometry_stage(value, state):
             reporter=None if reporter is CONSOLE else reporter,
         )
     state.set_metadata("geometry_evaluation", result)
+    return value
+
+
+def evaluate_texture_model(
+    glb: str | Path,
+    *,
+    out: str | Path | None = None,
+    reporter: Reporter | None = None,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """Score a model .glb's UV texture (texture_uv); never raises.
+
+    Returns the compact summary (texture_uv.web_summary) with status "done", or
+    {"status": "unavailable" | "failed", "reason": ...} when the model has nothing to
+    evaluate or the evaluation crashed. A missing Inception-v3 (no torch / torchvision,
+    or its weights can't be downloaded) is not a failure: F is left out and the result
+    is "partial". `overrides` are command-line settings (texture_uv.build_parser), e.g.
+    tau=50."""
+    out = Path(out) if out is not None else Path(glb).parent / TEXTURE_EVALUATION_DIR
+    try:
+        from evaluation import texture_uv as tu
+    except ImportError as exc:
+        return _not_run(
+            "unavailable", f"Missing package: {exc.name}", reporter, "Texture"
+        )
+
+    token = tu._REPORTER.set(reporter)
+    try:
+        return tu.run(tu.settings(**overrides), Path(glb), out)
+    except tu.Unavailable as exc:
+        return _not_run("unavailable", _reason(exc), reporter, "Texture")
+    except Exception as exc:  # noqa: BLE001 - the model is written; keep the job
+        if reporter is not None:
+            reporter.error(redact(traceback.format_exc()))
+        return _not_run("failed", f"{type(exc).__name__}: {exc}", reporter, "Texture")
+    finally:
+        tu._REPORTER.reset(token)
+
+
+def evaluate_texture_stage(value, state):
+    """Pipeline stage after export: score the written .glb's UV texture when
+    "evaluate_texture" is on. Its result (evaluate_texture_model) goes to the
+    "texture_evaluation" metadata; the job never fails because of it."""
+    if not state.get_metadata("evaluate_texture", False):
+        return value
+    reporter = get_reporter(state)
+    quiet = None if reporter is CONSOLE else reporter
+    path = state.get_metadata("output_path", None)
+    if not path or not Path(path).exists():
+        result = _not_run("unavailable", "no .glb was written", quiet, "Texture")
+    else:
+        overrides = {}
+        device = state.get_metadata("seg_device", None)
+        if device and device != "gpu":
+            overrides["device"] = device
+        result = evaluate_texture_model(
+            path,
+            out=state.get_metadata("texture_evaluation_dir", None),
+            reporter=quiet,
+            **overrides,
+        )
+    state.set_metadata("texture_evaluation", result)
     return value

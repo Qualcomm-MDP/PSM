@@ -113,6 +113,57 @@ When it can't run (no USGS LiDAR covers the area, laspy is missing, or there's n
 
 `summary.md` (start here), `summary.json`, `per_building.csv`, `per_building_errors.geojson` (open in QGIS), five charts (`01_scorecard.png` to `05_height_error_map.png`), and what it read from the mesh and OSM (`buildings_footprints_utm.geojson`, `terrain_grid.npz`, `osm_buildings.json`).
 
+## Texture quality (UV mapping)
+
+`src/evaluation/texture_uv.py` scores the buildings' texture with one number, following the "UV Mapping Texture Quality Metric":
+
+```text
+Confidence = 1 − (α·O + β·D + γ·F),   α + β + γ = 1,   α, β, γ ≥ 0
+```
+
+| Term | What it measures | Default weight |
+| ---- | ---------------- | -------------- |
+| **O** obstruction | how much of the surface has no photo texture: O = 1 − \|M_res ∩ M_gt\| / \|M_gt\| | α = 0.35 |
+| **D** distortion | the share of the surface (by area) whose texture is stretched: a triangle counts when its stretch s = σ1 / σ2 > s_max (1.5), the singular values of its surface → texture Jacobian | β = 0.25 |
+| **F** realism | F = 1 − exp(−FID / τ), the Fréchet Inception Distance between Inception-v3 features (2048-d pool) of K random patches (2048) of the texture and of a reference | γ = 0.40 |
+
+Each term is between 0 and 1, so the confidence is too; 1 is perfect.
+
+### How it reads this pipeline's model
+
+The paper compares a texture with a ground-truth texture of the same UV layout. This pipeline has no such texture, so by default:
+
+- **The texture** (I_res) is the buildings' atlas in the `.glb`. The ground (terrain and NAIP aerial photo) is not evaluated.
+- **M_gt** is the texels the mesh's UV triangles cover.
+- **M_res** is the texels in M_gt that hold real photo texture. Texturing records which texels came from a photo, not left grey because no photo saw them and not painted over by obstruction removal, in `model.texture_mask.png` next to the `.glb`. For models made before that file existed, every texel that isn't texturing's grey counts.
+- **O is weighted by surface area.** Each triangle counts with its area times the share of its texels in M_res. The atlas gives every triangle its own texel density (its photo's resolution), so counting texels as the paper does would weigh close-up walls more. Triangles no photo saw have no chart at all (texturing points them at one grey texel), so they count as fully missing. The paper's texel count is reported too (`o_texels`).
+- **D is measured in texels**, since the atlas isn't square. Triangles with no chart are left out of D (O counts them), as are triangles with no 3D area. A chart triangle of zero area (its corners in a line) is infinitely stretched, so it counts as distorted.
+- **The FID reference** is the job's own street photos (the originals saved in `images/`), sampled the same way: patches of 64 texels, resized to Inception's 299 px. The texture's patches must lie at least 90% inside M_res.
+- **τ is 100 by default**, a starting value. Calibrate it as the paper says: run the evaluation on results you consider good and use their median FID as τ (`--tau`).
+
+With `--gt-texture` (and optionally `--gt-mask` and `--res-mask`), the paper's definition is used as written: O counts texels against the ground truth's mask, and the FID compares with the ground-truth texture.
+
+If Inception-v3 can't be loaded (torch or torchvision missing, or its weights can't be downloaded), F is left out: the confidence is computed from O and D with their weights renormalised to sum to 1, and is marked **partial**. The weights download once (about 100 MB) into `$TORCH_HOME`, the model-cache volume in Docker. On a CPU the FID takes a few minutes; a GPU is used when there is one.
+
+### Running it
+
+- **Web app:** turn on **Evaluate texture quality** (see [Web App](../web-app.md#evaluating-texture)). It runs as the pipeline's last stage, `evaluate_texture`, and writes into the job's `texture_eval/` folder.
+- **Command line, with the pipeline:** `poetry run python src/main.py --bbox ... --output out/model.glb --evaluate-texture` writes `texture_eval/` next to the `.glb`, with reference photos in `images/`.
+- **Command line, on a finished model:**
+
+```bash
+poetry run python scripts/eval/eval_texture_uv.py --latest                  # newest web app job
+poetry run python scripts/eval/eval_texture_uv.py output/jobs/<job id>
+poetry run python scripts/eval/eval_texture_uv.py model.glb --reference photos/
+poetry run python scripts/eval/eval_texture_uv.py model.glb --gt-texture gt.png   # the paper's setting
+```
+
+`--alpha`, `--beta`, `--gamma`, `--s-max`, `--tau`, `--k`, `--patch`, `--seed` and `--device` change the settings; `--no-fid` skips the FID.
+
+### Output
+
+`summary.md` (start here), `summary.json` (every setting and count), `per_group.csv` (O and D per group of connected triangles, about one building each), and three charts: `01_scorecard.png` (the terms), `02_coverage.png` (the atlas with the texels that should hold photo texture and don't in red) and `03_stretch.png` (stretch across the surface).
+
 ## Comparing runs
 
 The JSON reports make it easy to compare runs with and without obstruction removal (`--no-seg`), on different hardware, or on different area sizes. Three benchmark runs from **Design Review 1** (older pipeline):
@@ -145,5 +196,6 @@ Quality is assessed by asking 20 randomly chosen University of Michigan students
 ## Source code
 
 - `src/common/profiler.py`: `PipelineProfiler`, `StageMetrics`
-- `src/evaluation/__init__.py`: the `evaluate_geometry` stage and `evaluate_model`
+- `src/evaluation/__init__.py`: the `evaluate_geometry` and `evaluate_texture` stages, `evaluate_model` and `evaluate_texture_model`
 - `src/evaluation/geometry_lidar.py`: the geometry evaluation (`scripts/eval/eval_geometry_lidar.py` runs it)
+- `src/evaluation/texture_uv.py`: the texture evaluation (`scripts/eval/eval_texture_uv.py` runs it)

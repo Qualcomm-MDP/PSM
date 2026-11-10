@@ -364,6 +364,7 @@ def apply_textures(
     seg_labels: LabelCache | None = None,
     fill_obstructions: bool = True,
     texture_mode: str = 'blend',
+    photo_mask: dict | None = None,
 ) -> trimesh.Trimesh
 ```
 
@@ -392,6 +393,11 @@ fill_obstructions they are painted over (LaMa); without it the photos stay as ta
 and the masks steer which photo textures a face: the most square-on view that the
 obstructions hide least.
 
+If photo_mask (a dict) is given, photo_mask["mask"] is set to the atlas's texels
+that hold photo texture (uint8, 255 = from a photo; not untextured grey, and not
+painted over by obstruction removal), the same size as the atlas: the texture
+evaluation's M_res. The model itself is unchanged.
+
 [source](https://github.com/Qualcomm-MDP/PSM/blob/main/src/texturing/tex_projection.py#L133)
 
 ### tex_projection()
@@ -400,7 +406,7 @@ obstructions hide least.
 def tex_projection(value, state: PipelineState)
 ```
 
-[source](https://github.com/Qualcomm-MDP/PSM/blob/main/src/texturing/tex_projection.py#L599)
+[source](https://github.com/Qualcomm-MDP/PSM/blob/main/src/texturing/tex_projection.py#L642)
 
 ## Geometry evaluation (LiDAR)
 
@@ -414,7 +420,7 @@ Pipeline stage after export: evaluate the written .glb against LiDAR when
 "evaluate_geometry" is on. Its result (evaluate_model) goes to the
 "geometry_evaluation" metadata; the job never fails because of it.
 
-[source](https://github.com/Qualcomm-MDP/PSM/blob/main/src/evaluation/__init__.py#L102)
+[source](https://github.com/Qualcomm-MDP/PSM/blob/main/src/evaluation/__init__.py#L121)
 
 ### evaluate_model()
 
@@ -438,7 +444,7 @@ USGS LiDAR for the area, laspy not installed, no internet) or crashed. Progress
 goes to `reporter` (the job log), or is printed without one. `overrides` are
 command-line settings (geometry_lidar.build_parser), e.g. terrain_tol=0.5.
 
-[source](https://github.com/Qualcomm-MDP/PSM/blob/main/src/evaluation/__init__.py#L37)
+[source](https://github.com/Qualcomm-MDP/PSM/blob/main/src/evaluation/__init__.py#L54)
 
 ## Obstruction removal
 

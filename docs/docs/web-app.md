@@ -24,6 +24,7 @@ The size of the area is shown under the coordinates. Each side can be at most 2.
 | **Aerial photos**       | Texture the ground and roofs with NAIP aerial photos. Continental US only; turns on Terrain (and locks it on while it's on). A note appears if the area looks outside NAIP's coverage. |
 | **Profile this run**    | Measure each stage's time and memory, shown live in the job's details. See [Profiling a job](#profiling-a-job).                                                                         |
 | **Evaluate geometry against LiDAR** | After export, compare the model's buildings and ground with USGS airborne LiDAR. US only, needs internet, adds a few minutes. A note appears if the area looks outside the US. See [Evaluating geometry](#evaluating-geometry). |
+| **Evaluate texture quality** | After export, score the buildings' texture: how much of it has no photo, how stretched it is and how real it looks. Downloads an Inception model (about 100 MB) the first time; a GPU is recommended, a CPU takes a few minutes. See [Evaluating texture](#evaluating-texture). |
 
 The starting values come from the defaults in [Settings](#settings).
 
@@ -33,7 +34,7 @@ The starting values come from the defaults in [Settings](#settings).
 
 Press **Generate model**. While a job runs:
 
-- The **timeline** shows each pipeline stage as pending, running, done, or failed. Stages turned off for this job (Terrain, Aerial photo, Evaluate geometry) show as **Skipped**.
+- The **timeline** shows each pipeline stage as pending, running, done, or failed. Stages turned off for this job (Terrain, Aerial photo, Evaluate geometry, Evaluating texture) show as **Skipped**.
 - The **pipeline log** streams the job's output live, including progress bars such as the photo downloads. **Download log** saves it as a text file.
 - The 3D preview is greyed out, and **Generate model** is disabled until the job finishes.
 
@@ -84,7 +85,7 @@ A job that fails keeps its profile up to the failed stage. Peak memory is what P
 
 Turn on **Evaluate geometry against LiDAR** to check the finished model against real measurements. After the model is exported, the **Evaluate geometry** stage downloads the USGS 3DEP airborne LiDAR for the area and compares each building and the ground with it (the same evaluation as the command line's, see [Evaluation](pipeline/evaluation.md#geometry-evaluation-against-lidar)). Its progress streams into the pipeline log like any other stage. Turn on **Terrain** as well to get every metric: a flat model only gets the building heights.
 
-The job's details then get an **Evaluation** section, below the Profile:
+The job's details then get an **Evaluation** section, below the Profile, with a **Geometry · LiDAR** part:
 
 - **Terrain verdict:** **✓ Pass**, **✗ Fail**, **? Inconclusive** or **– Not tested**, with the share of buildings whose ground is within ±1 m of the LiDAR ground and its 95% confidence interval. It passes when the interval's lower end reaches 95%; fewer than 30 evaluated buildings is always inconclusive.
 - **Headline figures:** how many OSM buildings were evaluated, the share of heights within ±3 m (about one storey), and the median height and terrain errors. Errors are model − LiDAR: positive means the model is too tall or too high.
@@ -97,6 +98,26 @@ The job's details then get an **Evaluation** section, below the Profile:
 The results appear when the job finishes. **View evaluation**, next to the progress bar, opens the current job's evaluation, and **Recent jobs** marks evaluated jobs **Evaluated**.
 
 If the evaluation can't run here (no USGS LiDAR for the area, no internet, or the LiDAR reader missing), the section says why and the job still finishes with its model. The same goes for an evaluation that fails. The results are saved in the job's `geometry_eval/` folder.
+
+## Evaluating texture
+
+Turn on **Evaluate texture quality** to score the buildings' texture with one number, the **confidence** (0 to 1, 1 is perfect; see [Evaluation](pipeline/evaluation.md#texture-quality-uv-mapping)). After the model is exported, the **Evaluating texture** stage reads the texture back from the `.glb` and measures three things, each from 0 (best) to 1 (worst):
+
+- **O, without photo texture:** the share of the buildings' surface no street photo textured: never seen by a photo, or painted over where obstructions (cars, people, poles) were removed.
+- **D, stretched texture:** the share of the surface whose texture is stretched more one way than the other (more than 1.5×).
+- **F, realism penalty:** how unlike the job's street photos the texture looks, from the Fréchet Inception Distance (FID) between the two: F = 1 − exp(−FID / τ). τ is a starting value until it is calibrated.
+
+The confidence is 1 − (0.35·O + 0.25·D + 0.40·F). Its progress streams into the pipeline log like any other stage. It works with any options; it doesn't need Terrain.
+
+The **Evaluation** section then gets a **Texture · UV quality** part (next to Geometry when both ran):
+
+- **Full or partial score:** if the Inception model can't be loaded (for example, no internet for its first download), F is left out and the confidence is computed from O and D, reweighted. The section says **Partial score** and why.
+- **Headline figures:** the confidence and its formula, O, D, and F with its FID and τ, each with a one-line explanation.
+- **Building groups with the most missing texture:** groups of connected triangles (about one building each), with their area, position from the model's centre, O and D.
+- **Charts:** the scorecard, the texture atlas with the texels that should hold photo texture and don't in red, and how stretched the texture is across the surface. Click one to open it full size.
+- **Full report:** the evaluation's `summary.md`, and downloads of the report, the per-group CSV and the full summary.
+
+**View evaluation** and the **Evaluated** marker in Recent jobs cover either evaluation. If the texture evaluation can't run (for example, the model has no texture), the part says why and the job still finishes with its model. The results are saved in the job's `texture_eval/` folder, and texturing saves which texels came from a photo in `model.texture_mask.png`.
 
 ## Settings
 
