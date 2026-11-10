@@ -27,6 +27,7 @@ from api.live import OVERFLOW, JobHub
 from api.settings import Settings, check_token
 from common import PipelineChain
 from common.env import load_app_env
+from evaluation import EVALUATION_DIR, OUTPUT_FILES
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WEB_DIR = REPO_ROOT / "web"
@@ -91,6 +92,16 @@ class TokenTest(BaseModel):
     token: str | None = Field(default=None, max_length=500)
 
 
+# What the geometry evaluation's files are served as
+EVALUATION_TYPES = {
+    ".md": "text/markdown; charset=utf-8",
+    ".png": "image/png",
+    ".csv": "text/csv; charset=utf-8",
+    ".geojson": "application/geo+json",
+    ".json": "application/json",
+}
+
+
 class JobRequest(BaseModel):
     bbox: BBox
     name: str = Field(default="Custom area", max_length=120)
@@ -110,6 +121,8 @@ class JobRequest(BaseModel):
     naip: bool = False
     # Same as the CLI's --profile: per-stage time and memory in profile.json.
     profile: bool = False
+    # Same as the CLI's --evaluate-geometry: compare the model with USGS LiDAR (US only)
+    evaluate_geometry: bool = False
 
 
 def _default_pipeline() -> PipelineChain:
@@ -298,6 +311,7 @@ def create_app(
                 "terrain": req.terrain or req.naip,
                 "naip": req.naip,
                 "profile": req.profile,
+                "evaluate_geometry": req.evaluate_geometry,
             },
         )
         return job.to_dict()
@@ -329,6 +343,30 @@ def create_app(
             path,
             media_type="application/json",
             filename=f"psm-{job.id}-profile.json" if download else None,
+        )
+
+    @app.get("/api/jobs/{job_id}/evaluation")
+    def get_evaluation(job_id: str) -> dict[str, Any]:
+        """The geometry evaluation's headline results (result.evaluation)."""
+        job = _job_or_404(job_id)
+        evaluation = (job.result or {}).get("evaluation")
+        if evaluation is None:
+            raise HTTPException(404, "This job has no geometry evaluation.")
+        return evaluation
+
+    @app.get("/api/jobs/{job_id}/evaluation/{name}")
+    def get_evaluation_file(
+        job_id: str, name: str, download: bool = False
+    ) -> FileResponse:
+        """One file the evaluation wrote (evaluation.OUTPUT_FILES only)."""
+        job = _job_or_404(job_id)
+        path = jobs.job_dir(job.id) / EVALUATION_DIR / name
+        if name not in OUTPUT_FILES or not path.is_file():
+            raise HTTPException(404, "No such evaluation file.")
+        return FileResponse(
+            path,
+            media_type=EVALUATION_TYPES.get(path.suffix, "application/octet-stream"),
+            filename=f"psm-{job.id}-{name}" if download else None,
         )
 
     @app.get("/api/jobs/{job_id}/overlays.json")

@@ -209,6 +209,7 @@ def test_real_pipeline_stages_drive_the_timeline():
         "naip",
         "texturing",
         "export",
+        "evaluate_geometry",
     ]
 
 
@@ -592,3 +593,118 @@ def test_jobs_saved_before_live_profiles_still_load(tmp_path):
 
     job = make_client(tmp_path).get(f"/api/jobs/{job_id}").json()
     assert job["profile"] is None
+
+
+# ---- the geometry evaluation (evaluate_geometry) ----
+
+
+def evaluating_pipeline(result, seen=None):
+    """fetch + export + an evaluate_geometry stage that writes like the real one."""
+
+    def evaluate(value, state):
+        if seen is not None:
+            seen.update(state.metadata)
+        if not state.get_metadata("evaluate_geometry", False):
+            return value
+        get_reporter(state).info("[lidar] 1,234 points kept")
+        out = Path(state.metadata["evaluation_dir"])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "summary.md").write_bytes(b"# LiDAR geometry evaluation\n")
+        (out / "01_scorecard.png").write_bytes(b"png")
+        (out / "lidar_points_abc.npz").write_bytes(b"cached points")
+        state.set_metadata("geometry_evaluation", result)
+        return value
+
+    def factory():
+        pipeline = fake_pipeline()
+        pipeline.add_stage(
+            "evaluate_geometry", evaluate, label="Evaluate geometry", detail="LiDAR"
+        )
+        return pipeline
+
+    return factory
+
+
+DONE = {
+    "status": "done",
+    "terrain": {"result": "PASS", "share": 0.97},
+    "files": ["summary.md", "01_scorecard.png"],
+}
+
+
+def test_evaluation_is_off_by_default_and_skipped(tmp_path):
+    seen = {}
+    client = make_client(tmp_path, evaluating_pipeline(DONE, seen))
+    created = client.post("/api/jobs", json={"bbox": BBOX}).json()
+    assert created["options"]["evaluate_geometry"] is False
+    job = wait_for(client, created["id"])
+
+    assert job["status"] == "done"
+    assert job["stages"]["evaluate_geometry"] == "skipped"
+    assert seen["evaluate_geometry"] is False
+    assert "evaluation" not in job["result"]
+    assert client.get(f"/api/jobs/{job['id']}/evaluation").status_code == 404
+    assert client.get(f"/api/jobs/{job['id']}/evaluation/summary.md").status_code == 404
+
+
+def test_evaluation_results_and_files_are_served(tmp_path):
+    seen = {}
+    client = make_client(tmp_path, evaluating_pipeline(DONE, seen))
+    created = client.post(
+        "/api/jobs", json={"bbox": BBOX, "evaluate_geometry": True, "profile": True}
+    ).json()
+    job = wait_for(client, created["id"])
+    jid = job["id"]
+
+    assert job["status"] == "done" and job["stages"]["evaluate_geometry"] == "done"
+    assert seen["evaluation_dir"] == str(tmp_path / jid / "geometry_eval")
+    assert job["result"]["evaluation"] == DONE
+    assert client.get(f"/api/jobs/{jid}/evaluation").json() == DONE
+    # its progress went to the job log like any stage's
+    log = client.get(f"/api/jobs/{jid}/log").text
+    assert "── Evaluate geometry ──" in log and "[lidar] 1,234 points kept" in log
+    # the profile counts it as a stage that ran
+    stages = {s["name"]: s["status"] for s in job["result"]["profile"]["stages"]}
+    assert stages["evaluate_geometry"] == "ok"
+
+    report = client.get(f"/api/jobs/{jid}/evaluation/summary.md")
+    assert report.status_code == 200
+    assert report.headers["content-type"].startswith("text/markdown")
+    assert report.text == "# LiDAR geometry evaluation\n"
+    png = client.get(f"/api/jobs/{jid}/evaluation/01_scorecard.png?download=true")
+    assert png.headers["content-type"] == "image/png"
+    assert f"psm-{jid}-01_scorecard.png" in png.headers["content-disposition"]
+
+
+def test_evaluation_serves_only_its_own_files(tmp_path):
+    client = make_client(tmp_path, evaluating_pipeline(DONE))
+    jid = wait_for(
+        client,
+        client.post("/api/jobs", json={"bbox": BBOX, "evaluate_geometry": True}).json()[
+            "id"
+        ],
+    )["id"]
+    base = f"/api/jobs/{jid}/evaluation"
+    # the cached LiDAR exists but is not one of the outputs; a listed one not written
+    assert client.get(f"{base}/lidar_points_abc.npz").status_code == 404
+    assert client.get(f"{base}/per_building.csv").status_code == 404
+    for name in ("..%2Fjob.json", "%2E%2E%2Fjob.json", "..%2F..%2Fsettings.json"):
+        assert client.get(f"{base}/{name}").status_code == 404
+    assert client.get("/api/jobs/nope/evaluation").status_code == 404
+
+
+def test_an_unavailable_evaluation_keeps_the_job_done(tmp_path):
+    reason = "[lidar] no USGS EPT collection covers this AOI; use --laz"
+    client = make_client(
+        tmp_path,
+        evaluating_pipeline({"status": "unavailable", "reason": reason}),
+    )
+    job = wait_for(
+        client,
+        client.post("/api/jobs", json={"bbox": BBOX, "evaluate_geometry": True}).json()[
+            "id"
+        ],
+    )
+    assert job["status"] == "done"
+    assert job["result"]["evaluation"] == {"status": "unavailable", "reason": reason}
+    assert client.get(f"/api/jobs/{job['id']}/model.glb").status_code == 200

@@ -23,6 +23,8 @@ poetry run uvicorn api.app:create_app --factory --app-dir src
 | GET    | `/api/jobs/{id}/model.glb`         | The model, once the job is done. `?download=true` sends it as a file named after the job.       |
 | GET    | `/api/jobs/{id}/log`               | The pipeline log as plain text, one timestamped line per entry. `?download=true` sends a file.  |
 | GET    | `/api/jobs/{id}/profile.json`      | The full profiler report of a job run with `profile` (updated after each stage while it runs). `?download=true` sends it as a file. `404` without a profile. |
+| GET    | `/api/jobs/{id}/evaluation`        | The geometry evaluation's results of a job run with `evaluate_geometry` (`result.evaluation`). `404` without one. |
+| GET    | `/api/jobs/{id}/evaluation/{name}` | One file the evaluation wrote: `summary.md`, `summary.json`, `per_building.csv`, `per_building_errors.geojson`, the charts `01_scorecard.png` to `05_height_error_map.png`, `buildings_footprints_utm.geojson` or `osm_buildings.json`. `?download=true` sends it as a file. `404` for any other name. |
 | GET    | `/api/jobs/{id}/images`            | The saved photo previews: `{"images": [{"id", "heading", "original", "cleaned"}]}` (URLs).      |
 | GET    | `/api/jobs/{id}/images/{name}`     | One preview image (JPEG).                                                                        |
 
@@ -39,7 +41,8 @@ poetry run uvicorn api.app:create_app --factory --app-dir src
   "device": "auto",
   "terrain": false,
   "naip": false,
-  "profile": false
+  "profile": false,
+  "evaluate_geometry": false
 }
 ```
 
@@ -53,6 +56,7 @@ poetry run uvicorn api.app:create_app --factory --app-dir src
 | `terrain`             | `false`         | the `--terrain` stage                                                    |
 | `naip`                | `false`         | the `--naip` stage; turns `terrain` on                                   |
 | `profile`             | `false`         | measure each stage (the CLI's `--profile`): `job.profile` and `/profile.json` |
+| `evaluate_geometry`   | `false`         | compare the model with USGS LiDAR after export (the CLI's `--evaluate-geometry`): `result.evaluation` and `/evaluation` |
 
 Invalid requests get `422` with a message in `detail`.
 
@@ -78,6 +82,17 @@ Invalid requests get `422` with a message in `detail`.
 - `status`: `queued`, `running`, `done` or `failed`.
 - `stages`: each stage is `pending`, `running`, `done`, `error` or `skipped` (an optional stage that's off for this job).
 - `result`, once done: `buildings`, `photos`, `faces`, `model_bytes`, and `thumbnail` (a preview image name). A profiled job also has a copy of its final `profile` there.
+- `result.evaluation`, for a job run with `evaluate_geometry`: `{"status": "unavailable" | "failed", "reason": ...}` when the evaluation couldn't run here or failed (the job is still `done`), otherwise:
+
+  | Field       | Meaning                                                                                                                             |
+  | ----------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+  | `status`    | `"done"`                                                                                                                             |
+  | `terrain`   | QR-06a: `result` (`PASS`, `FAIL`, `INCONCLUSIVE` or `NOT TESTED`), `text`, `tol_m`, `target`, and `share`, `ci95`, `hits`, `n` when tested |
+  | `height`    | QR-06b: `tol_m`, `text`, `all` and `groups.high` / `medium` / `low` (each `share`, `ci95`, `hits`, `n`)                               |
+  | `medians`   | per metric (`M1_height_err`, `M2_terrain_err`, `M2_base_err`, `M3_roof_err`, `M3_roof_err_lowground`): `n`, `median`, `rmse`, `nmad` |
+  | `buildings` | `total` OSM buildings, `evaluated`, and `by_status` (`ok`, `not_in_mesh`, `not_in_lidar`, `too_small`, `no_ground`, ...)            |
+  | `lidar`     | the LiDAR used: `source`, `url`, `vertical`                                                                                          |
+  | `files`     | the files written, for `/evaluation/{name}`                                                                                          |
 - `profile`: `null` unless the job was started with `profile`. Otherwise it's updated (and pushed over the WebSocket as a `job` message) when each stage starts and ends, and kept when the job fails:
 
   | Field               | Meaning                                                                    |

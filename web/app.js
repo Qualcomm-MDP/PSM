@@ -110,6 +110,8 @@ function renderNaipNote() {
   const c = NAIP_COVERAGE;
   const inside = lat >= c.south && lat <= c.north && lon >= c.west && lon <= c.east;
   $("naipNote").hidden = !$("naip").checked || inside;
+  // USGS 3DEP covers more than NAIP (Alaska, Hawaii), but this box catches the obvious misses
+  $("evaluateNote").hidden = !$("evaluate").checked || inside;
 }
 function syncInputs() {
   ids.forEach((k) => (inputs[k].value = box[k].toFixed(5)));
@@ -404,6 +406,7 @@ segmented("device", (v) => (device = v));
 // and locks it; turning them off restores whatever Terrain was set to before.
 let terrainWanted = false;
 $("terrain").addEventListener("change", () => (terrainWanted = $("terrain").checked));
+$("evaluate").addEventListener("change", renderNaipNote);
 $("naip").addEventListener("change", () => {
   const naip = $("naip").checked;
   $("terrain").checked = naip || terrainWanted;
@@ -845,6 +848,7 @@ function renderProgress(job) {
   $("progLabel").textContent = label;
   $("status").classList.toggle("failed", job?.status === "failed");
   renderProfileButton();
+  renderEvaluationButton();
 }
 
 // ---------- Jobs ----------
@@ -872,7 +876,10 @@ function renderJobs() {
     .map((j) => {
       const chip =
         statusChip(j.status) +
-        (j.options?.profile ? ` <span class="chip" title="Run with Profile this run: open it to see the profile">Profiled</span>` : "");
+        (j.options?.profile ? ` <span class="chip" title="Run with Profile this run: open it to see the profile">Profiled</span>` : "") +
+        (j.options?.evaluate_geometry
+          ? ` <span class="chip" title="Run with Evaluate geometry against LiDAR: open it to see the evaluation">Evaluated</span>`
+          : "");
       const thumb = j.result?.thumbnail
         ? `<img class="thumb" src="/api/jobs/${esc(j.id)}/images/${esc(j.result.thumbnail)}" alt="">`
         : `<span class="thumb"></span>`;
@@ -955,6 +962,7 @@ function renderJobModal(job) {
   dl.setAttribute("aria-disabled", String(!done));
   $("jobFacts").innerHTML = jobFactsHtml(job);
   renderJobProfile(job);
+  renderJobEvaluation(job);
 
   // Only a finished job has a model to show; otherwise say why there isn't one.
   if (done) {
@@ -1006,6 +1014,7 @@ function jobFactsHtml(job) {
   if ("terrain" in o) rows.push(["Terrain", o.terrain ? "On" : "Off"]);
   if ("naip" in o) rows.push(["Aerial photos", o.naip ? "NAIP ground and roofs" : "Off"]);
   if ("profile" in o) rows.push(["Profile", o.profile ? "On" : "Off"]);
+  if ("evaluate_geometry" in o) rows.push(["LiDAR evaluation", o.evaluate_geometry ? "On" : "Off"]);
   if (job.result?.photos != null) rows.push(["Photos", `<span class="mono">${job.result.photos}</span>`]);
   if (job.result?.aligned_photos != null)
     rows.push(["Aligned photos", `<span class="mono">${job.result.aligned_photos}</span>`]);
@@ -1239,6 +1248,274 @@ $("viewProfile").addEventListener("click", () => {
   if (!job) return;
   openJobModal(job);
   requestAnimationFrame(() => $("jobProfile").scrollIntoView({ behavior: "smooth", block: "start" }));
+});
+
+// ---------- Evaluation (jobs run with "Evaluate geometry against LiDAR") ----------
+// job.result.evaluation is the evaluation's summary (src/evaluation/geometry_lidar.py
+// web_summary) once the job ends, or {status: "unavailable" | "failed", reason}.
+// Its files (charts, CSV, report) come from /api/jobs/<id>/evaluation/<name>.
+const jobEvaluation = (job) => job?.result?.evaluation || null;
+const EVAL_STATUS = {
+  ok: "evaluated",
+  not_in_mesh: "in OSM, not in the model",
+  not_in_lidar: "not in the LiDAR (built or demolished since the flight?)",
+  outside_lidar: "outside the LiDAR read",
+  raised_part: "raised part (bridge, overhang)",
+  too_small: "too small to measure",
+  no_ground: "too few ground points around it",
+};
+const EVAL_CHARTS = {
+  "01_scorecard.png": "Scorecard: the terrain verdict and the height shares by height confidence",
+  "02_height_error_by_source.png": "Height error (model − LiDAR) by where the height came from",
+  "03_height_scatter.png": "Model height against LiDAR height, one dot per building",
+  "04_placement_vs_slope.png": "Base placement error against the ground's slope",
+  "05_height_error_map.png": "Map of the buildings coloured by height error",
+};
+const EVAL_DOWNLOADS = {
+  "summary.md": "Report (.md)",
+  "per_building.csv": "Per building (.csv)",
+  "per_building_errors.geojson": "Map (.geojson)",
+  "summary.json": "Summary (.json)",
+};
+const evalFile = (job, name, download = false) =>
+  `/api/jobs/${encodeURIComponent(job.id)}/evaluation/${encodeURIComponent(name)}${download ? "?download=true" : ""}`;
+const pct = (v) => (v == null || !Number.isFinite(v) ? "—" : `${Math.round(v * 100)}%`);
+const metres = (v) => (v == null || !Number.isFinite(v) ? "—" : `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(2)} m`);
+const CONFIDENCE_LABELS = { high: "High · height tag", medium: "Medium · levels tag", low: "Low · no tag (default)" };
+const VERDICT = {
+  PASS: { cls: "ok", mark: "✓", text: "Pass" },
+  FAIL: { cls: "bad", mark: "✗", text: "Fail" },
+  INCONCLUSIVE: { cls: "", mark: "?", text: "Inconclusive" },
+  "NOT TESTED": { cls: "", mark: "–", text: "Not tested" },
+};
+const evalReport = new Map(); // job id -> summary.md text, once loaded
+
+function renderJobEvaluation(job) {
+  const el = $("jobEvaluation");
+  const ev = jobEvaluation(job);
+  if (!job?.options?.evaluate_geometry && !ev) {
+    el.hidden = true;
+    el.replaceChildren();
+    delete el.dataset.key;
+    return;
+  }
+  const stage = job.stages?.evaluate_geometry;
+  // Re-render only when something changed, so the open report and images stay put.
+  const key = JSON.stringify([job.id, job.status, stage, ev?.status, ev?.files]);
+  if (el.dataset.key === key) return;
+  el.dataset.key = key;
+  el.hidden = false;
+
+  const head = (note, actions = "") => `
+    <div class="prof-head">
+      <div><h3 id="jobEvaluationTitle">Evaluation</h3><span class="prof-note" role="status">${esc(note)}</span></div>
+      ${actions}
+    </div>`;
+
+  if (!ev) {
+    let note;
+    if (job.status === "queued") note = "Waiting to start";
+    else if (stage === "running") note = "Comparing the model with USGS LiDAR… its progress is in the pipeline log";
+    else if (isActive(job)) note = "Runs after the model is exported";
+    else if (job.status === "failed") note = "Not run: the job failed before the model was exported";
+    else note = "No evaluation was recorded for this job";
+    el.innerHTML = head(note) + (isActive(job) ? `<p class="prof-empty">The results appear here when the job finishes.</p>` : "");
+    return;
+  }
+  if (ev.status !== "done") {
+    const what = ev.status === "unavailable" ? "Not available here" : "The evaluation failed";
+    el.innerHTML =
+      head(what) +
+      `<p class="eval-reason"><strong>${ev.status === "unavailable" ? "ⓘ" : "⚠"} ${esc(what)}:</strong> ${esc(ev.reason || "no reason given")}. The model itself is fine.</p>`;
+    return;
+  }
+
+  const files = new Set(ev.files || []);
+  const lidar = ev.lidar?.url ? ev.lidar.url.split("/").slice(-2, -1)[0] : ev.lidar?.source || "";
+  const downloads = Object.entries(EVAL_DOWNLOADS)
+    .filter(([name]) => files.has(name))
+    .map(([name, label]) => `<a class="btn small" href="${evalFile(job, name, true)}">${esc(label)}</a>`)
+    .join("");
+
+  const t = ev.terrain || {};
+  const v = VERDICT[t.result] || { cls: "", mark: "?", text: t.result || "—" };
+  const verdict = `<div class="eval-verdict">
+      <span class="chip ${v.cls}"><span aria-hidden="true">${v.mark}</span> Terrain: ${esc(v.text)}</span>
+      <span>${esc(t.text || "")}${t.result === "PASS" || t.result === "FAIL" ? "" : t.result === "NOT TESTED" ? " (turn on Terrain to test it)" : ""}</span>
+    </div>`;
+
+  const h = ev.height || {};
+  const b = ev.buildings || {};
+  const m = ev.medians || {};
+  const tile = (label, value, sub) =>
+    `<div class="prof-tile"><span class="prof-tile-label">${label}</span><span class="prof-tile-value">${value}</span>${sub ? `<span class="prof-tile-sub">${sub}</span>` : ""}</div>`;
+  const tiles = [
+    tile("Buildings evaluated", `${b.evaluated ?? 0}`, `of ${b.total ?? 0} OSM buildings`),
+    tile(
+      `Heights within ±${h.tol_m ?? 3} m`,
+      pct(h.all?.share),
+      h.all ? `${h.all.hits} of ${h.all.n} · 95% CI ${pct(h.all.ci95?.[0])}–${pct(h.all.ci95?.[1])}` : "no heights evaluated",
+    ),
+    tile("Median height error", metres(m.M1_height_err?.median), "model − LiDAR; + is too tall"),
+    tile(
+      "Median terrain error",
+      metres(m.M2_terrain_err?.median),
+      m.M2_terrain_err ? "model ground − LiDAR ground" : "needs Terrain",
+    ),
+  ].join("");
+
+  const groups = Object.entries(CONFIDENCE_LABELS)
+    .map(([c, label]) => {
+      const g = h.groups?.[c];
+      return `<tr><td>${esc(label)}</td><td class="num">${g ? g.n : 0}</td><td class="num">${g ? pct(g.share) : "—"}</td>
+        <td class="num">${g ? `${pct(g.ci95?.[0])}–${pct(g.ci95?.[1])}` : "—"}</td></tr>`;
+    })
+    .join("");
+  const notEvaluated = Object.entries(b.by_status || {})
+    .filter(([s]) => s !== "ok")
+    .map(([s, n]) => `${n} ${esc(EVAL_STATUS[s] || s.replaceAll("_", " "))}`);
+
+  const metricRows = [
+    ["M1_height_err", "Height (M1)"],
+    ["M2_terrain_err", "Terrain at the building (M2)"],
+    ["M2_base_err", "Base placement"],
+    ["M3_roof_err", "Roof elevation (M3)"],
+  ]
+    .filter(([k]) => m[k])
+    .map(
+      ([k, label]) => `<tr><td>${label}</td><td class="num">${m[k].n}</td><td class="num">${metres(m[k].median)}</td>
+        <td class="num">${m[k].rmse.toFixed(2)} m</td><td class="num">${m[k].nmad.toFixed(2)} m</td></tr>`,
+    )
+    .join("");
+
+  const charts = Object.entries(EVAL_CHARTS)
+    .filter(([name]) => files.has(name))
+    .map(
+      ([name, alt]) => `<figure class="eval-chart"><a href="${evalFile(job, name)}" target="_blank" rel="noopener" title="Open full size">
+        <img src="${evalFile(job, name)}" alt="${esc(alt)}" loading="lazy"></a><figcaption>${esc(alt)}</figcaption></figure>`,
+    )
+    .join("");
+
+  el.innerHTML = `
+    ${head(`Against USGS 3DEP LiDAR${lidar ? ` · ${lidar}` : ""}`, downloads ? `<div class="eval-actions">${downloads}</div>` : "")}
+    ${verdict}
+    <div class="prof-tiles">${tiles}</div>
+    <div class="eval-tables">
+      <div class="prof-table-wrap"><table class="prof-table eval-table">
+        <caption>Heights within ±${h.tol_m ?? 3} m, by height confidence</caption>
+        <thead><tr><th>Height from OSM</th><th class="num">Buildings</th><th class="num">Within</th><th class="num">95% CI</th></tr></thead>
+        <tbody>${groups}</tbody>
+      </table></div>
+      ${
+        metricRows
+          ? `<div class="prof-table-wrap"><table class="prof-table eval-table">
+        <caption>Errors (model − LiDAR)</caption>
+        <thead><tr><th>Metric</th><th class="num">n</th><th class="num">Median</th><th class="num">RMSE</th><th class="num">NMAD</th></tr></thead>
+        <tbody>${metricRows}</tbody>
+      </table></div>`
+          : ""
+      }
+    </div>
+    ${notEvaluated.length ? `<p class="prof-note">Not evaluated: ${notEvaluated.join(" · ")}</p>` : ""}
+    ${charts ? `<div class="eval-charts">${charts}</div>` : ""}
+    ${files.has("summary.md") ? `<details class="prof-details eval-report"><summary>Full report</summary><div class="eval-md"></div></details>` : ""}`;
+
+  const details = el.querySelector(".eval-report");
+  details?.addEventListener("toggle", () => {
+    if (details.open) showEvalReport(job, details.querySelector(".eval-md"));
+  });
+}
+
+async function showEvalReport(job, box) {
+  if (!evalReport.has(job.id)) {
+    box.textContent = "Loading…";
+    try {
+      const r = await fetch(evalFile(job, "summary.md"));
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      evalReport.set(job.id, await r.text());
+    } catch (e) {
+      box.textContent = `Couldn't load the report (${e.message}).`;
+      return;
+    }
+  }
+  renderMarkdown(evalReport.get(job.id), box);
+}
+
+// A small, safe Markdown reader for the report: headings, lists, tables and
+// paragraphs, with **bold** and `code`. Everything is set as text, never HTML.
+function inlineMd(text, parent) {
+  for (const part of text.split(/(\*\*[^*]+\*\*|`[^`]+`)/)) {
+    if (!part) continue;
+    if (part.startsWith("**") && part.endsWith("**")) {
+      const b = document.createElement("strong");
+      b.textContent = part.slice(2, -2);
+      parent.append(b);
+    } else if (part.startsWith("`") && part.endsWith("`")) {
+      const c = document.createElement("code");
+      c.textContent = part.slice(1, -1);
+      parent.append(c);
+    } else parent.append(part);
+  }
+}
+function renderMarkdown(md, box) {
+  box.replaceChildren();
+  const lines = md.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+    const heading = line.match(/^(#{1,6})\s+(.*)/);
+    if (heading) {
+      const h = document.createElement(`h${Math.min(6, heading[1].length + 3)}`);
+      inlineMd(heading[2], h);
+      box.append(h);
+    } else if (line.trimStart().startsWith("|")) {
+      const rows = [];
+      while (i < lines.length && lines[i].trimStart().startsWith("|")) rows.push(lines[i++]);
+      i--;
+      const wrap = document.createElement("div");
+      wrap.className = "prof-table-wrap";
+      const table = document.createElement("table");
+      table.className = "prof-table eval-md-table";
+      rows
+        .filter((r) => !/^\s*\|[\s:|-]+\|\s*$/.test(r))
+        .forEach((r, n) => {
+          const tr = document.createElement("tr");
+          for (const cell of r.trim().replace(/^\||\|$/g, "").split("|")) {
+            const td = document.createElement(n === 0 ? "th" : "td");
+            inlineMd(cell.trim(), td);
+            tr.append(td);
+          }
+          table.append(tr);
+        });
+      wrap.append(table);
+      box.append(wrap);
+    } else if (/^\s*[-*]\s+/.test(line)) {
+      const ul = document.createElement("ul");
+      while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
+        const li = document.createElement("li");
+        inlineMd(lines[i++].replace(/^\s*[-*]\s+/, ""), li);
+        ul.append(li);
+      }
+      i--;
+      box.append(ul);
+    } else {
+      const p = document.createElement("p");
+      inlineMd(line, p);
+      box.append(p);
+    }
+  }
+}
+
+// "View evaluation" on the main page opens the current job's details at its evaluation.
+function renderEvaluationButton() {
+  const job = state.current;
+  $("viewEvaluation").hidden = !(job?.options?.evaluate_geometry || jobEvaluation(job));
+}
+$("viewEvaluation").addEventListener("click", () => {
+  const job = state.current;
+  if (!job) return;
+  openJobModal(job);
+  requestAnimationFrame(() => $("jobEvaluation").scrollIntoView({ behavior: "smooth", block: "start" }));
 });
 
 jobDlg.addEventListener("click", (e) => {
@@ -1707,6 +1984,7 @@ $("go").addEventListener("click", async () => {
         terrain: $("terrain").checked,
         naip: $("naip").checked,
         profile: $("profile").checked,
+        evaluate_geometry: $("evaluate").checked,
       }),
     });
     // The socket often delivers newer updates for this job (running, first

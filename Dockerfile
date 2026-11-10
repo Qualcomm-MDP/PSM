@@ -25,11 +25,12 @@ RUN pip install "poetry>=2,<3" poetry-plugin-export
 WORKDIR /build
 COPY pyproject.toml poetry.lock ./
 
-# Export the lockfile, then pull torch out of it so the right build (CPU or
+# Export the lockfile (with the eval group: laspy, ~5 MB, so the web app's geometry
+# evaluation works out of the box), then pull torch out of it so the right build (CPU or
 # CUDA) can be installed from PyTorch's own index. The CUDA runtime packages
 # the lock pins for Linux are dropped too: the CUDA torch wheel brings its own,
 # and the CPU build doesn't need them.
-RUN poetry export --only main --without-hashes -f requirements.txt -o requirements.txt \
+RUN poetry export --only main,eval --without-hashes -f requirements.txt -o requirements.txt \
     && grep -E '^(torch|torchvision)==' requirements.txt | cut -d';' -f1 > torch.txt \
     && grep -vE '^(torch|torchvision|triton|nvidia-[a-z0-9-]+|cuda-[a-z0-9-]+)==' requirements.txt > deps.txt
 
@@ -59,7 +60,8 @@ ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/src \
     HF_HOME=/cache/huggingface \
-    TORCH_HOME=/cache/torch
+    TORCH_HOME=/cache/torch \
+    LIDAR_CACHE_DIR=/cache/lidar
 
 RUN mkdir -p /cache /app/output && chown -R app:app /cache /app
 

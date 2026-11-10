@@ -1,14 +1,14 @@
-"""scripts/eval/eval_geometry_lidar.py on a synthetic scene: the pipeline builds and exports
-a .glb, the script evaluates that file. No network, known answers."""
+"""evaluation/geometry_lidar.py (scripts/eval/eval_geometry_lidar.py) on a synthetic scene:
+the pipeline builds and exports a .glb, the evaluation reads that file. No network, known
+answers."""
 
-import importlib.util
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from common import ProgressMonitor
+from evaluation import geometry_lidar as ev
 from common.constants import BoundingBox
 from common.MeshUtils import _get_utm_transformer
 from common.pipeline_chain import PipelineState
@@ -16,13 +16,6 @@ from mesh_builder.extrude import EMBED_M, extrude_buildings
 from pipeline import export_mesh
 from terrain import Terrain
 
-SCRIPT = (
-    Path(__file__).resolve().parents[1] / "scripts" / "eval" / "eval_geometry_lidar.py"
-)
-spec = importlib.util.spec_from_file_location("eval_geometry_lidar", SCRIPT)
-assert spec is not None and spec.loader is not None
-ev = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(ev)
 
 BBOX = BoundingBox(42.2830, 42.2850, -83.7485, -83.7455)
 SLOPE = 0.05  # model ground rises 5 cm per metre east
@@ -348,3 +341,139 @@ def test_relation_members_already_fetched_as_ways_are_not_counted_twice():
     # not a closed ring, so the relation adds no footprint
     assert ev.outline_parts(relation, to_xy, way_ids={1}) == []
     assert len(ev.outline_parts(relation, to_xy)) == 1
+
+
+# ---- the pipeline's evaluate_geometry stage (evaluation.evaluate_model) ----
+
+
+class _Collect:
+    """A Reporter that keeps what it's told, like the web app's job log."""
+
+    def __init__(self):
+        self.lines = []
+
+    def info(self, message):
+        self.lines.append(("info", message))
+
+    def warning(self, message):
+        self.lines.append(("warning", message))
+
+    def error(self, message):
+        self.lines.append(("error", message))
+
+
+def _fake_lidar(monkeypatch, terrain):
+    def load_lidar(args, aoi, crs, out):
+        feats, _ = ev.load_footprints(out / "buildings_footprints_utm.geojson")
+        x, y, z, c = _lidar(terrain, feats)
+        meta = {
+            "source": "ept",
+            "url": "https://example/MI_Test_2020/ept.json",
+            "class_counts": {
+                int(k): int(n) for k, n in zip(*np.unique(c, return_counts=True))
+            },
+        }
+        return x, y, z, c, meta
+
+    monkeypatch.setattr(ev, "load_lidar", load_lidar)
+
+
+def test_the_stage_evaluates_the_model_and_streams_its_progress(
+    osm, tmp_path, monkeypatch
+):
+    from evaluation import OUTPUT_FILES, evaluate_model
+
+    terrain = _terrain()
+    glb = _export(tmp_path, terrain)
+    _fake_lidar(monkeypatch, terrain)
+    log = _Collect()
+    result = evaluate_model(
+        glb, BOX, osm={"elements": ELEMENTS}, grid=terrain, reporter=log
+    )
+
+    assert result["status"] == "done", result
+    assert result["terrain"]["result"] == "INCONCLUSIVE"  # 3 buildings < --min-n 30
+    assert result["terrain"]["share"] == 1.0 and result["terrain"]["n"] == 3
+    assert result["buildings"] == {
+        "total": 4,
+        "evaluated": 3,
+        "by_status": {"not_in_mesh": 1, "ok": 3},
+    }
+    assert result["height"]["all"]["hits"] == 1
+    assert set(result["height"]["groups"]) == {"high", "medium", "low"}
+    assert result["medians"]["M2_terrain_err"]["median"] == pytest.approx(
+        -LIDAR_GROUND_OFFSET, abs=0.02
+    )
+    out = tmp_path / "geometry_eval"
+    assert result["files"] and set(result["files"]) <= set(OUTPUT_FILES)
+    assert all((out / f).exists() for f in result["files"])
+    assert json.loads((out / "summary.json").read_text())["web"]["status"] == "done"
+    # the command line's lines went to the reporter (the job log), not stdout
+    text = [m for _, m in log.lines]
+    assert any(m.startswith("[QR-06a terrain] INCONCLUSIVE") for m in text)
+    assert any(m.startswith("[done] wrote") for m in text)
+
+
+def test_no_lidar_here_is_unavailable_not_a_failure(osm, tmp_path, monkeypatch):
+    from evaluation import evaluate_model
+
+    glb = _export(tmp_path, _terrain())
+    monkeypatch.setattr(ev, "find_usgs_ept", lambda lon, lat, session: [])
+    log = _Collect()
+    result = evaluate_model(glb, BOX, reporter=log)
+    assert result == {
+        "status": "unavailable",
+        "reason": "[lidar] no USGS EPT collection covers this AOI; use --laz",
+    }
+    assert log.lines[-1][0] == "warning" and "The model is kept" in log.lines[-1][1]
+
+
+def test_no_internet_and_crashes_are_recorded(osm, tmp_path, monkeypatch):
+    import requests
+
+    from evaluation import evaluate_model
+
+    glb = _export(tmp_path, _terrain())
+
+    def offline(*a, **k):
+        raise requests.ConnectionError("no route to host")
+
+    monkeypatch.setattr(ev, "find_usgs_ept", offline)
+    result = evaluate_model(glb, BOX, reporter=_Collect())
+    assert result["status"] == "unavailable" and "no internet" in result["reason"]
+
+    def broken(*a, **k):
+        raise ValueError("bad roof")
+
+    monkeypatch.setattr(ev, "load_lidar", broken)
+    log = _Collect()
+    result = evaluate_model(glb, BOX, reporter=log)
+    assert result == {"status": "failed", "reason": "ValueError: bad roof"}
+    assert any(kind == "error" and "Traceback" in m for kind, m in log.lines)
+
+
+def test_missing_laspy_is_unavailable(osm, tmp_path, monkeypatch):
+    import builtins
+
+    from evaluation import evaluate_model
+
+    glb = _export(tmp_path, _terrain())
+    monkeypatch.setattr(ev, "find_usgs_ept", lambda *a: [{"name": "X", "url": "u"}])
+    real_import = builtins.__import__
+
+    def no_laspy(name, *args, **kwargs):
+        if name == "laspy":
+            raise ModuleNotFoundError("No module named 'laspy'", name="laspy")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_laspy)
+    result = evaluate_model(glb, BOX, reporter=_Collect())
+    assert result["status"] == "unavailable" and "laspy" in result["reason"]
+
+
+def test_the_stage_does_nothing_when_off():
+    from evaluation import evaluate_geometry_stage
+
+    state = PipelineState(initial_input=None, current_value=None, metadata={})
+    assert evaluate_geometry_stage("mesh", state) == "mesh"
+    assert state.get_metadata("geometry_evaluation", None) is None

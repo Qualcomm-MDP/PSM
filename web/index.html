@@ -188,6 +188,19 @@
             <span class="track"></span><span class="knob"></span>
           </label>
         </div>
+        <div class="opt-row">
+          <div class="text">
+            <strong id="evaluateLabel">Evaluate geometry against LiDAR</strong>
+            <span id="evaluateHint">Compare the buildings and ground with USGS LiDAR after export (US only, needs internet, adds a few minutes); see it in the job's details</span>
+          </div>
+          <label class="switch" for="evaluate">
+            <input id="evaluate" type="checkbox" aria-labelledby="evaluateLabel" aria-describedby="evaluateHint">
+            <span class="track"></span><span class="knob"></span>
+          </label>
+        </div>
+        <p class="opt-note" id="evaluateNote" role="status" hidden>
+          This area looks outside the US, which USGS LiDAR covers, so the evaluation would have nothing to compare with.
+        </p>
       </section>
     </div>
 
@@ -228,6 +241,7 @@
           <div class="status" id="status"><strong id="progLabel">Ready to generate</strong><span id="progPct">0%</span></div>
           <span class="live-status" id="liveStatus" hidden></span>
           <button class="btn small" id="viewProfile" type="button" hidden>View profile</button>
+          <button class="btn small" id="viewEvaluation" type="button" hidden>View evaluation</button>
         </div>
         <div class="stepper" id="stepper">
           <span class="track" aria-hidden="true"></span>
@@ -331,6 +345,7 @@
       </div>
     </div>
     <section class="job-profile" id="jobProfile" aria-labelledby="jobProfileTitle" hidden></section>
+    <section class="job-eval" id="jobEvaluation" aria-labelledby="jobEvaluationTitle" hidden></section>
     <section class="job-photos" aria-labelledby="jobPhotosTitle">
       <div class="job-photos-head">
         <h3 id="jobPhotosTitle">Street photos</h3>
