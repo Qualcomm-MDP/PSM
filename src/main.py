@@ -135,6 +135,14 @@ def main():
         "e.g. 0.6. Off by default.",
     )
     parser.add_argument(
+        "--seg-batch",
+        metavar="N",
+        type=int,
+        default=None,
+        help="Mask2Former images per GPU call during texturing. Default: 8 on "
+        "CUDA, 1 otherwise. 1 disables batching (A/B).",
+    )
+    parser.add_argument(
         "--poses",
         choices=POSE_SOURCES,
         default="raw",
@@ -207,6 +215,7 @@ def main():
             "use_terrain": use_terrain,
             "use_naip": args.naip,
             "min_quality": args.min_quality,
+            "seg_batch": args.seg_batch,
             "pose_source": args.poses,
             "aligned_only": args.aligned_only,
             "alignment_dir": args.alignment_dir,

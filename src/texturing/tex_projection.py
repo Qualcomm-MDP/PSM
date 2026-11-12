@@ -18,8 +18,12 @@ from common.reporter import Reporter, get_reporter
 from naip.naip import roof_faces, roof_patches
 from data_ingest.pano import PANO_TYPES, crop_view
 from texturing.blend import bake_walls
-from segmentation import build_obstruction_mask, synthesize_texture
-from segmentation.model import LabelCache, model_id_or_default
+from segmentation import (
+    build_obstruction_masks,
+    default_seg_batch,
+    synthesize_texture,
+)
+from segmentation.model import LabelCache, model_id_or_default, select_device
 
 CAMERA_HEIGHT_M = 1.6
 ATLAS_W = 4096
@@ -147,6 +151,7 @@ def apply_textures(
     fill_obstructions: bool = True,
     texture_mode: str = "blend",
     photo_mask: dict | None = None,
+    seg_batch: int | None = None,
 ) -> trimesh.Trimesh:
     """Project street photos onto the mesh.
 
@@ -177,6 +182,8 @@ def apply_textures(
     that hold photo texture (uint8, 255 = from a photo; not untextured grey, and not
     painted over by obstruction removal), the same size as the atlas: the texture
     evaluation's M_res. The model itself is unchanged.
+
+    seg_batch: Mask2Former images per GPU call. None: 8 on CUDA, 1 otherwise.
     """
     # Full-resolution photos are ~12 MP (~36 MB decoded) and an area can have
     # ~1000 of them, so they're kept on disk and loaded one at a time.
@@ -199,6 +206,7 @@ def apply_textures(
             fill_obstructions,
             texture_mode,
             photo_mask,
+            seg_batch,
         )
 
 
@@ -220,6 +228,7 @@ def _apply_textures(
     fill_obstructions: bool = True,
     texture_mode: str = "blend",
     photo_mask: dict | None = None,
+    seg_batch: int | None = None,
 ) -> trimesh.Trimesh:
     center_lon = (bbox.min_lon + bbox.max_lon) / 2
     center_lat = (bbox.min_lat + bbox.max_lat) / 2
@@ -254,6 +263,18 @@ def _apply_textures(
     reused = {"photos": 0, "class maps": 0}
 
     cam_data: list[dict] = []
+    times = {"decode": 0.0, "segment": 0.0, "lama": 0.0, "blend": 0.0}
+    n_segmented = 0
+    n_inpainted = 0
+    batch_size = (
+        seg_batch
+        if seg_batch is not None and seg_batch > 0
+        else (default_seg_batch(seg_device) if remove_obs else 1)
+    )
+    if remove_obs:
+        reporter.info(
+            f"  Mask2Former batch={batch_size} on {select_device(seg_device)}"
+        )
     # Each photo's source: a view of a 360 photo (data_ingest.pano) comes from that 360
     # photo, and a photo the alignment stored is read from its store instead of its URL (an
     # image the alignment added already points at its own frame, whose size its pose was
@@ -283,50 +304,16 @@ def _apply_textures(
 
     fetched = [0]  # sources fetched and released
     pano: tuple[str, np.ndarray] | None = None  # the last 360 photo: (id, image)
-    for n, (img_id, meta, crop, source_id, where, stored) in enumerate(
-        reporter.progress(plan, desc="Downloading images")
-    ):
-        fetch_through(order[source_id] + DOWNLOAD_AHEAD)
-        try:
-            if crop and pano is not None and pano[0] == source_id:
-                img = pano[1]  # the other view of the 360 photo just downloaded
-            else:
-                raw = fetches[source_id].result()
-                img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
-                if img is None:
-                    raise ValueError(f"Failed to decode image from {where}")
-                if stored:
-                    reused["photos"] += 1
-            if crop:
-                pano = (source_id, img)
-                img = crop_view(img, crop["yaw_deg"], crop["fov_deg"], crop["size"])
-                raw = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 95])[
-                    1
-                ].tobytes()
-        except Exception as exc:
-            reporter.info(f"  Download failed [{img_id}]: {exc}")
-            continue
-        finally:
-            # this source's bytes are not needed once its last photo is past
-            if n + 1 == len(plan) or plan[n + 1][3] != source_id:
-                if fetches.pop(source_id, None) is not None:
-                    fetched[0] += 1
-        # Folder for this photo's previews, or None once enough are saved.
-        preview_dir = image_dir if len(saved) < max_saved_images else None
-        if preview_dir is not None:
-            _save_preview(img, preview_dir / f"{img_id}_original.jpg")
-        if remove_obs:
-            labels = None
-            if cached_labels is not None and seg_labels is not None:
-                seg = seg_labels.get(str(img_id), img.shape[:2])
-                if seg is not None:
-                    labels = (seg, cached_labels)
-                    reused["class maps"] += 1
-            mask = build_obstruction_mask(img, seg_model, seg_device, reporter, labels)
-            if fill_obstructions:
-                img = synthesize_texture(img, mask, reporter, seg_device)
-            # kept small: which pixels are obstructions (scores the views without fill;
-            # with fill, what was painted over, for the texture evaluation's mask)
+    pending: list[dict] = []
+
+    def spool_photo(photo: dict, mask: np.ndarray | None) -> None:
+        img = photo["img"]
+        img_id = photo["img_id"]
+        meta = photo["meta"]
+        raw = photo["raw"]
+        preview_dir = photo["preview_dir"]
+        small_mask = None
+        if mask is not None:
             small_mask = cv2.resize(
                 mask,
                 (
@@ -362,7 +349,6 @@ def _apply_textures(
         else:
             img_path = work_dir / f"{img_id}.jpg"
             img_path.write_bytes(raw)
-        del img, raw
         w = meta["original_width"]
         h = meta["original_height"]
         x, y = transformer.transform(meta["longitude"], meta["latitude"])
@@ -381,6 +367,91 @@ def _apply_textures(
                 "Cw": camera_position(x, y, terrain, meta.get("camera_height_m")),
             }
         )
+
+    def flush_pending() -> None:
+        nonlocal n_segmented, n_inpainted
+        if not pending:
+            return
+        if not remove_obs:
+            for photo in pending:
+                spool_photo(photo, None)
+            pending.clear()
+            return
+        t0 = time.perf_counter()
+        masks = build_obstruction_masks(
+            [p["img"] for p in pending],
+            seg_model,
+            seg_device,
+            reporter,
+            [p["labels"] for p in pending],
+            batch_size=batch_size,
+        )
+        times["segment"] += time.perf_counter() - t0
+        n_segmented += sum(1 for p in pending if p["labels"] is None)
+        for photo, mask in zip(pending, masks):
+            if fill_obstructions:
+                t1 = time.perf_counter()
+                photo["img"] = synthesize_texture(
+                    photo["img"], mask, reporter, seg_device
+                )
+                times["lama"] += time.perf_counter() - t1
+                n_inpainted += 1
+            spool_photo(photo, mask)
+        pending.clear()
+
+    for n, (img_id, meta, crop, source_id, where, stored) in enumerate(
+        reporter.progress(plan, desc="Preparing photos")
+    ):
+        fetch_through(order[source_id] + DOWNLOAD_AHEAD)
+        t_decode = time.perf_counter()
+        try:
+            if crop and pano is not None and pano[0] == source_id:
+                img = pano[1]  # the other view of the 360 photo just downloaded
+            else:
+                raw = fetches[source_id].result()
+                img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+                if img is None:
+                    raise ValueError(f"Failed to decode image from {where}")
+                if stored:
+                    reused["photos"] += 1
+            if crop:
+                pano = (source_id, img)
+                img = crop_view(img, crop["yaw_deg"], crop["fov_deg"], crop["size"])
+                raw = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 95])[
+                    1
+                ].tobytes()
+        except Exception as exc:
+            reporter.info(f"  Download failed [{img_id}]: {exc}")
+            continue
+        finally:
+            # this source's bytes are not needed once its last photo is past
+            if n + 1 == len(plan) or plan[n + 1][3] != source_id:
+                if fetches.pop(source_id, None) is not None:
+                    fetched[0] += 1
+        times["decode"] += time.perf_counter() - t_decode
+        # Folder for this photo's previews, or None once enough are saved.
+        preview_dir = image_dir if len(saved) < max_saved_images else None
+        if preview_dir is not None:
+            _save_preview(img, preview_dir / f"{img_id}_original.jpg")
+        labels = None
+        if remove_obs and cached_labels is not None and seg_labels is not None:
+            seg = seg_labels.get(str(img_id), img.shape[:2])
+            if seg is not None:
+                labels = (seg, cached_labels)
+                reused["class maps"] += 1
+        pending.append(
+            {
+                "img": img,
+                "img_id": img_id,
+                "meta": meta,
+                "raw": raw,
+                "preview_dir": preview_dir,
+                "labels": labels,
+            }
+        )
+        if len(pending) >= batch_size:
+            flush_pending()
+    flush_pending()
 
     pool.shutdown(wait=False, cancel_futures=True)
     if image_dir is not None:
@@ -410,6 +481,7 @@ def _apply_textures(
     skip = set(roof_idx.tolist())
 
     patch_records: list[dict]
+    t_blend = time.perf_counter()
     if texture_mode == "blend":
         patch_records, stats = bake_walls(
             verts_proj, faces, face_normals, cam_data, skip, reporter, UNTEXTURED_GREY
@@ -586,6 +658,14 @@ def _apply_textures(
         roofs = roof_patches(verts_proj, faces, roof_idx, aerial)
         reporter.info(f"  {len(roofs)} / {len(roof_idx)} roof faces from NAIP")
         patch_records.extend(roofs)
+    times["blend"] = time.perf_counter() - t_blend
+    reporter.info(
+        "  Texturing breakdown: "
+        f"decode {times['decode']:.1f}s, "
+        f"segment {times['segment']:.1f}s ({n_segmented} photos, batch={batch_size}), "
+        f"lama {times['lama']:.1f}s ({n_inpainted} photos), "
+        f"blend {times['blend']:.1f}s"
+    )
 
     cx, cy, row_h = 0, 0, 0
     for p in patch_records:
@@ -663,6 +743,7 @@ def tex_projection(value, state: PipelineState):
         image_store=state.get_metadata("image_store", None),
         seg_labels=state.get_metadata("segmentation_labels", None),
         photo_mask=photo_mask,
+        seg_batch=state.get_metadata("seg_batch", None),
     )
     if "mask" in photo_mask:  # saved next to the .glb by the export
         state.set_metadata("texture_photo_mask", photo_mask["mask"])

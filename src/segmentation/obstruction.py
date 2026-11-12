@@ -89,10 +89,91 @@ def _load_lama(
     return _lama
 
 
+# CUDA can hold several Mask2Former 384px images; the CPU/MPS path stays at 1.
+CUDA_SEG_BATCH = 8
+
+
+def default_seg_batch(device: str | None = None) -> int:
+    """How many photos Mask2Former should see at once: 8 on NVIDIA, else 1."""
+    return CUDA_SEG_BATCH if select_device(device).type == "cuda" else 1
+
+
+def _is_oom(exc: BaseException) -> bool:
+    name = type(exc).__name__
+    if name in ("OutOfMemoryError", "CUDAOutOfMemoryError"):
+        return True
+    msg = str(exc).lower()
+    return "out of memory" in msg
+
+
+def segment_images(
+    images_bgr: list[np.ndarray],
+    model_id: str | None = None,
+    device: str | None = None,
+    reporter: Reporter | None = None,
+    batch_size: int = 1,
+) -> list[np.ndarray]:
+    """Class maps for every image, `batch_size` at a time. On CUDA OOM, drop to 1
+    and keep going (never crash the pipeline)."""
+    if not images_bgr:
+        return []
+    size = max(1, batch_size)
+    out: list[np.ndarray] = []
+    i = 0
+    while i < len(images_bgr):
+        chunk = images_bgr[i : i + size]
+        try:
+            out.extend(segment(chunk, model_id, device, reporter))
+            i += len(chunk)
+        except RuntimeError as exc:
+            if size == 1 or not _is_oom(exc):
+                raise
+            (reporter or get_reporter()).warning(
+                f"Segmentation batch of {size} ran out of GPU memory; retrying one at a time"
+            )
+            size = 1
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+    return out
+
+
 def obstruction_mask(labels: np.ndarray, names: dict[int, str]) -> np.ndarray:
     """255 where the class map (with its class names) shows an obstruction, grown by 7 px."""
     mask = class_lut(names, OBSTRUCTION_NAMES, value=255)[labels]
     return cv2.dilate(mask, np.ones((15, 15), np.uint8))
+
+
+def build_obstruction_masks(
+    images_bgr: list[np.ndarray],
+    model_id: str | None = None,
+    device: str | None = None,
+    reporter: Reporter | None = None,
+    labels_list: list[tuple[np.ndarray, dict[int, str]] | None] | None = None,
+    batch_size: int | None = None,
+) -> list[np.ndarray]:
+    """Obstruction masks for a batch of BGR images. labels_list[i] is the class map
+    (and names) when image i was already segmented; None means run the model.
+    batch_size None: 8 on CUDA, 1 otherwise."""
+    if labels_list is None:
+        labels_list = [None] * len(images_bgr)
+    if len(labels_list) != len(images_bgr):
+        raise ValueError("labels_list must match images_bgr")
+    need = [i for i, lab in enumerate(labels_list) if lab is None]
+    resolved: list[tuple[np.ndarray, dict[int, str]] | None] = list(labels_list)
+    if need:
+        size = default_seg_batch(device) if batch_size is None else max(1, batch_size)
+        segs = segment_images(
+            [images_bgr[i] for i in need],
+            model_id,
+            device,
+            reporter,
+            batch_size=size,
+        )
+        _, model = load_model(model_id, device, reporter)
+        names = id2label(model)
+        for i, seg in zip(need, segs):
+            resolved[i] = (seg, names)
+    return [obstruction_mask(*lab) for lab in resolved]  # type: ignore[arg-type]
 
 
 def build_obstruction_mask(
@@ -104,11 +185,9 @@ def build_obstruction_mask(
 ) -> np.ndarray:
     """labels: the image's class map and class names when it was segmented already
     (segmentation.model.LabelCache); otherwise the model runs on the image."""
-    if labels is None:
-        seg = segment([img_bgr], model_id, device, reporter)[0]
-        _, model = load_model(model_id, device, reporter)
-        labels = (seg, id2label(model))
-    return obstruction_mask(*labels)
+    return build_obstruction_masks(
+        [img_bgr], model_id, device, reporter, [labels], batch_size=1
+    )[0]
 
 
 def synthesize_texture(

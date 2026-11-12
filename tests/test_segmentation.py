@@ -43,6 +43,72 @@ def test_label_cache_scales_maps_and_drops_another_models(tmp_path):
     assert cache.get("123") is None and cache.model()[0] == "cityscapes"
 
 
+def test_batch_masks_match_one_at_a_time():
+    from segmentation.obstruction import build_obstruction_mask, build_obstruction_masks
+
+    img = np.zeros((40, 40, 3), np.uint8)
+    labels = (_labels([17, 19, 55, 64]), VISTAS)
+    one = [build_obstruction_mask(img, labels=labels) for _ in range(3)]
+    batch = build_obstruction_masks(
+        [img, img, img], labels_list=[labels, labels, labels], batch_size=3
+    )
+    assert len(batch) == 3
+    assert all(np.array_equal(a, b) for a, b in zip(one, batch))
+
+
+def test_segment_images_one_gpu_call_per_batch(monkeypatch):
+    from segmentation import obstruction
+
+    calls: list[int] = []
+
+    def fake_segment(images, *a, **k):
+        calls.append(len(images))
+        return [np.zeros(im.shape[:2], np.uint8) for im in images]
+
+    monkeypatch.setattr(obstruction, "segment", fake_segment)
+    monkeypatch.setattr(obstruction, "load_model", lambda *a, **k: (None, object()))
+    monkeypatch.setattr(obstruction, "id2label", lambda m: VISTAS)
+    imgs = [np.zeros((8, 8, 3), np.uint8) for _ in range(5)]
+    masks = obstruction.build_obstruction_masks(imgs, batch_size=5)
+    assert calls == [5]
+    assert len(masks) == 5
+
+
+def test_segment_batch_falls_back_on_oom(monkeypatch):
+    from segmentation import obstruction
+
+    calls: list[int] = []
+
+    def fake_segment(images, *a, **k):
+        calls.append(len(images))
+        if len(images) > 1:
+            raise RuntimeError("CUDA out of memory")
+        return [np.zeros(im.shape[:2], np.uint8) for im in images]
+
+    monkeypatch.setattr(obstruction, "segment", fake_segment)
+    monkeypatch.setattr(obstruction, "load_model", lambda *a, **k: (None, object()))
+    monkeypatch.setattr(obstruction, "id2label", lambda m: VISTAS)
+    imgs = [np.zeros((4, 4, 3), np.uint8) for _ in range(3)]
+    masks = obstruction.build_obstruction_masks(imgs, batch_size=3)
+    assert calls[0] == 3 and all(c == 1 for c in calls[1:])
+    assert len(masks) == 3
+
+
+def test_default_seg_batch_is_8_on_cuda(monkeypatch):
+    import torch
+
+    from segmentation.model import select_device
+    from segmentation.obstruction import default_seg_batch
+
+    monkeypatch.delenv("SEG_DEVICE", raising=False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
+    assert select_device("auto").type == "cuda"
+    assert default_seg_batch("auto") == 8
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert default_seg_batch("cpu") == 1
+
+
 def test_auto_and_gpu_pick_the_best_device(monkeypatch):
     import torch
 

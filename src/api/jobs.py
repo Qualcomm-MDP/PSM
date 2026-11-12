@@ -275,6 +275,7 @@ class JobManager:
                     "fill_obstructions": opts.get("fill_obstructions", True),
                     "seg_model": SEG_MODELS.get(opts.get("seg_model", "large")),
                     "seg_device": opts.get("device", "auto"),
+                    "seg_batch": opts.get("seg_batch"),
                     "use_terrain": opts.get("terrain", False),
                     "use_naip": opts.get("naip", False),
                     "evaluate_geometry": opts.get("evaluate_geometry", False),
