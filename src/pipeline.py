@@ -29,6 +29,9 @@ def export_mesh(value, state):
     transformer = _get_utm_transformer(center_lon, center_lat)
     ox, oy = transformer.transform(center_lon, center_lat)
 
+    if isinstance(value, trimesh.Trimesh):
+        value = trimesh.Scene(value)
+
     building_parts: list[trimesh.Trimesh] = [
         geometry
         for geometry in value.geometry.values()
