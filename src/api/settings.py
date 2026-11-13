@@ -38,6 +38,8 @@ DEFAULTS: dict[str, Any] = {
     "sky_only": False,
     "seg_model": "large",
     "device": "auto",
+    # delete the downloaded Mapillary photos once a job is done (the model and texture stay)
+    "delete_photos": False,
 }
 # A small area that always has imagery, so a valid token gets a 200 quickly.
 _TEST_BBOX = "-83.7170,42.2918,-83.7160,42.2924"

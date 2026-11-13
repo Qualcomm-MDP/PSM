@@ -52,6 +52,7 @@ def test_no_token_anywhere(tmp_path):
         "sky_only": False,
         "seg_model": "large",
         "device": "auto",
+        "delete_photos": False,
     }
 
 
@@ -176,6 +177,7 @@ def test_defaults_are_saved_and_validated(tmp_path):
         "sky_only": True,
         "seg_model": "tiny",
         "device": "cpu",
+        "delete_photos": False,
     }
     assert saved["mapillary"]["set"] is False  # token untouched
 

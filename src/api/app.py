@@ -66,6 +66,7 @@ class JobDefaults(BaseModel):
     sky_only: bool | None = None
     seg_model: Literal["large", "tiny"] | None = None
     device: Literal["auto", "cpu", "gpu", "cuda"] | None = None
+    delete_photos: bool | None = None
 
 
 class SettingsUpdate(BaseModel):
@@ -113,6 +114,9 @@ class JobRequest(BaseModel):
     # Same as the CLI's --terrain and --naip; aerial photos need the terrain.
     terrain: bool = False
     naip: bool = False
+    # Once the job is done, delete the Mapillary photos it downloaded (the pose alignment's
+    # frames and full-size originals); the model, its texture and the overlays stay
+    delete_photos: bool = False
 
 
 def _default_pipeline() -> PipelineChain:
@@ -303,6 +307,7 @@ def create_app(
                 "device": req.device,
                 "terrain": req.terrain or req.naip,
                 "naip": req.naip,
+                "delete_photos": req.delete_photos,
             },
         )
         return job.to_dict()

@@ -1036,6 +1036,15 @@ function jobFactsHtml(job) {
   if (job.result?.photos != null) rows.push(["Photos", `<span class="mono">${job.result.photos}</span>`]);
   if (job.result?.aligned_photos != null)
     rows.push(["Aligned photos", `<span class="mono">${job.result.aligned_photos}</span>`]);
+  if (o.delete_photos)
+    rows.push([
+      "Photos after the run",
+      job.result?.photos_deleted
+        ? `Deleted · <span class="mono">${fmtBytes(job.result.photos_deleted.bytes)}</span> freed`
+        : job.status === "done"
+          ? "Kept (nothing to delete)"
+          : "To be deleted when done",
+    ]);
   if (jobWarnings(job).length)
     rows.push(["Warnings", jobWarnings(job).map((w) => `<div class="warn">${esc(w)}</div>`).join("")]);
   if (job.error) rows.push(["Error", `<span class="bad">${esc(job.error)}</span>`]);
@@ -1324,6 +1333,7 @@ function applyDefaults(d) {
   $("fillObs").checked = d.fill_obstructions !== false;
   $("skyOnly").checked = !!d.sky_only;
   $("seg").checked = d.remove_obstructions;
+  $("deletePhotos").checked = !!d.delete_photos;
   $("model").value = d.seg_model;
   // "cuda" was the GPU button's value before it meant any GPU (NVIDIA or Apple)
   const wanted = d.device === "cuda" ? "gpu" : d.device;
@@ -1336,6 +1346,8 @@ function applyDefaults(d) {
 // each is shown only when it applies (and keeps its setting while hidden).
 function syncOptionRows() {
   $("alignedOnlyRow").hidden = $("poses").value !== "colmap";
+  // only the aligned poses download photos to this computer
+  $("deletePhotosRow").hidden = $("poses").value !== "colmap";
   $("skyOnlyRow").hidden = !$("seg").checked;
   // sky only is masked, never painted over: "Fill obstructions" does not apply
   $("fillObsRow").hidden = !$("seg").checked || $("skyOnly").checked;
@@ -1380,6 +1392,7 @@ async function openSettings(intro = "") {
     $("defFill").checked = d.fill_obstructions !== false;
     $("defSkyOnly").checked = !!d.sky_only;
     $("defSeg").checked = d.remove_obstructions;
+    $("defDeletePhotos").checked = !!d.delete_photos;
     $("defModel").value = d.seg_model;
     defDevice = d.device === "cuda" ? "gpu" : d.device;
     setDeviceButtons("defDevice", defDevice);
@@ -1554,6 +1567,7 @@ $("settingsForm").addEventListener("submit", async (e) => {
           sky_only: $("defSkyOnly").checked,
           seg_model: $("defModel").value,
           device: defDevice,
+          delete_photos: $("defDeletePhotos").checked,
         },
       }),
     });
@@ -1594,6 +1608,7 @@ $("go").addEventListener("click", async () => {
         device,
         terrain: $("terrain").checked,
         naip: $("naip").checked,
+        delete_photos: $("poses").value === "colmap" && $("deletePhotos").checked,
       }),
     });
     // The socket often delivers newer updates for this job (running, first

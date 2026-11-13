@@ -173,6 +173,43 @@ class JobManager:
         info["not_removed"] = left
         return info
 
+    def _delete_photos(
+        self, job: Job, result: dict[str, Any], log: JobReporter
+    ) -> dict[str, Any] | None:
+        """The delete_photos option, after a finished job: remove the Mapillary photos its pose
+        alignment downloaded (the frames and full-size originals under the alignment folder's
+        data/mapillary/). Their metadata (cameras.json), the masks, reconstruction and alignment
+        stay, as do the job's model, texture, overlays and preview images. Nothing is removed from
+        a folder another job uses or one outside the alignment outputs. Returns {files, bytes}
+        (None when there was nothing to delete)."""
+        folder = result.get("alignment_folder")
+        if not folder:
+            log.info("Delete photos: this job downloaded no photos to keep, nothing to delete")
+            return None
+        folder = Path(folder)
+        kept = self._alignment_kept(job, folder)
+        if kept:
+            log.info(f"Delete photos: kept, the alignment folder is {kept}")
+            return None
+        files = [
+            f
+            for f in (folder / "data" / "mapillary").rglob("*")
+            if f.is_file() and not f.is_symlink() and f.suffix.lower() in PHOTO_SUFFIXES
+        ]
+        freed = 0
+        for f in files:
+            try:
+                size = f.stat().st_size
+                f.unlink()
+                freed += size
+            except OSError:
+                pass
+        log.info(
+            f"Deleted {len(files)} Mapillary photos ({freed / 1e6:.0f} MB) from {folder}; "
+            "the model and its texture are kept"
+        )
+        return {"files": len(files), "bytes": freed}
+
     def _alignment_kept(self, job: Job, folder: Path) -> str | None:
         """Why the alignment folder must stay (None: it can go with the job)."""
         from pose_alignment.geo_common import ROIS_DIR
@@ -277,6 +314,10 @@ class JobManager:
         try:
             outcome = self._run_pipeline(job, job_dir, model_path, log)
             elapsed = time.monotonic() - started
+            if outcome["status"] == "done" and job.options.get("delete_photos"):
+                deleted = self._delete_photos(job, outcome["result"], log)
+                if deleted is not None:
+                    outcome["result"]["photos_deleted"] = deleted
             if outcome["status"] == "done":
                 log.info(f"Done in {elapsed:.0f}s.")
             else:
@@ -386,6 +427,10 @@ def _summarize(state: Any, job_dir: Path) -> dict[str, Any]:
         if images:
             result["thumbnail"] = images[0].get("cleaned") or images[0]["original"]
     return result
+
+
+# the photos delete_photos removes (frames, 360 crops and full-size originals)
+PHOTO_SUFFIXES = {".jpg", ".jpeg", ".png"}
 
 
 def _folder_bytes(folder: Path) -> int:

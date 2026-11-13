@@ -120,6 +120,16 @@
             <span class="track"></span><span class="knob"></span>
           </label>
         </div>
+        <div class="opt-row" id="deletePhotosRow">
+          <div class="text">
+            <strong id="deletePhotosLabel">Delete photos when done</strong>
+            <span id="deletePhotosHint">Free the space the downloaded Mapillary photos take; the model and its texture stay</span>
+          </div>
+          <label class="switch" for="deletePhotos">
+            <input id="deletePhotos" type="checkbox" aria-labelledby="deletePhotosLabel" aria-describedby="deletePhotosHint">
+            <span class="track"></span><span class="knob"></span>
+          </label>
+        </div>
         <div class="opt-row">
           <div class="text">
             <strong id="segLabel">Remove obstructions</strong>
@@ -438,6 +448,16 @@
         </div>
         <label class="switch" for="defFill">
           <input id="defFill" type="checkbox" aria-labelledby="defFillLabel" aria-describedby="defFillHint">
+          <span class="track"></span><span class="knob"></span>
+        </label>
+      </div>
+      <div class="opt-row">
+        <div class="text">
+          <strong id="defDeletePhotosLabel">Delete photos when done</strong>
+          <span id="defDeletePhotosHint">With aligned poses: free the space the downloaded Mapillary photos take; the model and its texture stay</span>
+        </div>
+        <label class="switch" for="defDeletePhotos">
+          <input id="defDeletePhotos" type="checkbox" aria-labelledby="defDeletePhotosLabel" aria-describedby="defDeletePhotosHint">
           <span class="track"></span><span class="knob"></span>
         </label>
       </div>
