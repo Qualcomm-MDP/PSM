@@ -75,7 +75,8 @@ def main():
         "--no-seg",
         action="store_true",
         default=False,
-        help="Skip obstruction removal in texturing (no segmentation, no inpainting)",
+        help="Skip obstruction removal in texturing (no segmentation, no inpainting, the sky "
+        "not masked)",
     )
     parser.add_argument(
         "--texture",
@@ -95,7 +96,7 @@ def main():
         action="store_true",
         default=False,
         help="Segment the obstructions (cars, people, poles, ...) but do not paint them over "
-        "(LaMa): each face takes the photo where they hide it least",
+        "(LaMa): each face takes the photo where they hide it least (the sky is masked either way)",
     )
     parser.add_argument(
         "--bbox",

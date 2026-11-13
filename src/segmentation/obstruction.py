@@ -53,9 +53,10 @@ OBSTRUCTION_NAMES = {
     "ground animal",
 }
 
-# Sky only (the web app's "Sky only", the CLI's --sky-only): the sky masked in the facade photos
-# so it is never projected onto a wall (an OSM building drawn taller than the real one, a roof
-# line); everything else is left as taken. Vistas and Cityscapes both name the class "Sky".
+# The sky, masked in the facade photos so it is never projected onto a wall (an OSM building drawn
+# taller than the real one, a roof line), and never painted over (inpainting sky makes no wall):
+# with obstruction removal, besides the obstructions; with Sky only (the CLI's --sky-only), alone,
+# everything else left as taken. Vistas and Cityscapes both name the class "Sky".
 SKY_NAMES = {"sky"}
 
 LAMA_MAX_DIM = 1024
@@ -101,6 +102,18 @@ def obstruction_mask(
     obstructions; SKY_NAMES for sky only), grown by 7 px."""
     mask = class_lut(names, classes, value=255)[labels]
     return cv2.dilate(mask, np.ones((15, 15), np.uint8))
+
+
+def photo_labels(
+    img_bgr: np.ndarray,
+    model_id: str | None = None,
+    device: str | None = None,
+    reporter: Reporter | None = None,
+) -> tuple[np.ndarray, dict[int, str]]:
+    """The photo's class map and class names (segmented once, for several masks)."""
+    seg = segment([img_bgr], model_id, device, reporter)[0]
+    _, model = load_model(model_id, device, reporter)
+    return seg, id2label(model)
 
 
 def build_obstruction_mask(

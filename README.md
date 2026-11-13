@@ -59,8 +59,9 @@ and, for aligned poses, [COLMAP](https://colmap.github.io/install.html) 4.2 or n
 
     Draw a box on the map and generate. The Options panel has **Camera poses** (Aligned to
     OpenStreetMap by default, or Mapillary's computed or raw GPS poses), **Aligned photos
-    only**, **Remove obstructions** and **Fill obstructions** (off: obstructions are found
-    but not painted over, and each wall takes the photos they hide least), **Terrain** and
+    only**, **Remove obstructions** (cars, poles, people and the sky; **Sky only** for just
+    the sky) and **Fill obstructions** (off: obstructions are found but not painted over, and
+    each wall takes the photos they hide least; the sky is never painted over), **Terrain** and
     **Aerial photos**. The job's log shows every stage as it runs, and the 3D preview's
     **Cameras** and **Point cloud** buttons show the photos' camera positions (green
     aligned, orange Mapillary computed, red raw GPS) and the alignment's reconstructed points.

@@ -231,7 +231,7 @@ def test_sky_only_masks_the_sky_instead_of_painting_over(monkeypatch):
         raise AssertionError("sky only must not paint over")
 
     monkeypatch.setattr(tex_projection, "build_obstruction_mask", fake_mask)
-    monkeypatch.setattr(tex_projection, "remove_obstructions", no_fill)
+    monkeypatch.setattr(tex_projection, "synthesize_texture", no_fill)
     data = {
         "1": {
             "latitude": lat0,
@@ -254,6 +254,74 @@ def test_sky_only_masks_the_sky_instead_of_painting_over(monkeypatch):
         reporter=_Quiet(),
     )
     assert asked == [SKY_NAMES]
+
+
+def test_removing_obstructions_also_masks_the_sky(monkeypatch):
+    """Remove obstructions: one segmentation; the obstructions are painted over and the sky
+    masked (never painted over); with fill off, both are masked."""
+    import trimesh
+
+    from common.constants import BoundingBox
+    from common.MeshUtils import _get_utm_transformer
+    from segmentation import SKY_NAMES
+    from texturing import tex_projection
+
+    lat0, lon0 = 42.28, -83.74
+    bbox = BoundingBox(lat0 - 0.001, lat0 + 0.001, lon0 - 0.001, lon0 + 0.001)
+    x0, y0 = _get_utm_transformer(lon0, lat0).transform(lon0, lat0)
+    verts = np.array(
+        [
+            [x0 - 2, y0 + 10, 0],
+            [x0 + 2, y0 + 10, 0],
+            [x0 + 2, y0 + 10, -3],
+            [x0 - 2, y0 + 10, -3],
+        ]
+    )
+    photo = cv2.imencode(".jpg", np.full((300, 400, 3), (0, 0, 255), np.uint8))[
+        1
+    ].tobytes()
+    monkeypatch.setattr(tex_projection, "_fetch_bytes", lambda where, attempts=3: photo)
+    data = {
+        "1": {
+            "latitude": lat0,
+            "longitude": lon0,
+            "rotvec": Rotation.from_matrix(LOOK_NORTH).as_rotvec().tolist(),
+            "camera_type": "perspective",
+            "image_url": "https://x/photo.jpg",
+            "focal_length_pixels": 200.0,
+            "original_width": 400,
+            "original_height": 300,
+        }
+    }
+    for fill in (True, False):
+        segmented, asked, painted = [], [], []
+
+        def labels(img, *args, **kwargs):
+            segmented.append(1)
+            return np.zeros(img.shape[:2], np.int64), {0: "sky"}
+
+        def fake_mask(img, *args, classes=None, **kwargs):
+            asked.append(classes)
+            m = np.zeros(img.shape[:2], np.uint8)
+            m[:10 if classes == SKY_NAMES else 20] = 255  # the sky: the top rows
+            return m
+
+        monkeypatch.setattr(tex_projection, "photo_labels", labels)
+        monkeypatch.setattr(tex_projection, "build_obstruction_mask", fake_mask)
+        monkeypatch.setattr(
+            tex_projection,
+            "synthesize_texture",
+            lambda img, mask, *a, **k: painted.append(int((mask > 0).sum())) or img,
+        )
+        mesh = trimesh.Trimesh(
+            vertices=verts, faces=[[0, 2, 1], [0, 3, 2]], process=False
+        )
+        tex_projection.apply_textures(
+            mesh, data, bbox, remove_obs=True, fill_obstructions=fill, reporter=_Quiet()
+        )
+        assert segmented == [1]  # one segmentation for both masks
+        assert asked == [None, SKY_NAMES]  # the obstructions, then the sky
+        assert painted == ([20 * 400] if fill else [])  # only the obstructions painted
 
 
 def test_undistorter_maps_pinhole_pixels_to_the_fisheye_photo():

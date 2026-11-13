@@ -18,7 +18,7 @@ from common.reporter import Reporter, get_reporter
 from naip.naip import roof_faces, roof_patches
 from data_ingest.pano import PANO_TYPES, crop_view
 from texturing.blend import bake_walls
-from segmentation import SKY_NAMES, build_obstruction_mask, remove_obstructions
+from segmentation import SKY_NAMES, build_obstruction_mask, photo_labels, synthesize_texture
 from segmentation.model import LabelCache, model_id_or_default
 
 CAMERA_HEIGHT_M = 1.6
@@ -32,9 +32,9 @@ DOWNLOAD_WORKERS = 8
 DOWNLOAD_AHEAD = 32
 # Colour (0-255) of faces no street photo covers: roofs, back walls, gaps.
 UNTEXTURED_GREY = 225
-# With fill_obstructions off, each photo's obstruction mask is kept at 1/MASK_SCALE size to
-# score how much of a face it hides; a face then takes the photo with the best
-# frontality x unobstructed share.
+# Each photo's mask (the sky, and the obstructions when they are not painted over) is kept at
+# 1/MASK_SCALE size to score how much of a face it hides; a face then takes the photo with the
+# best frontality x unobstructed share (blend: the masked texels get no weight).
 MASK_SCALE = 8
 
 
@@ -234,11 +234,12 @@ def apply_textures(
     class maps the pose alignment already made: those photos are not downloaded or
     segmented again.
 
-    With remove_obs, the obstructions (cars, people, poles, ...) are segmented. With
-    fill_obstructions they are painted over (LaMa); without it the photos stay as taken
-    and the masks steer which photo textures a face: the most square-on view that the
-    obstructions hide least. With sky_only, only the sky is segmented, and masked the same
-    way (never painted over): a wall is textured from the photos that show it there, not sky.
+    With remove_obs, the obstructions (cars, people, poles, ...) and the sky are segmented.
+    With fill_obstructions the obstructions are painted over (LaMa); without it the photos
+    stay as taken and the masks steer which photo textures a face: the most square-on view
+    that the obstructions hide least. The sky is always masked that way, never painted over:
+    a wall is textured from the photos that show it there, not sky. With sky_only, only the
+    sky is segmented and masked; cars, poles and people stay as taken.
     """
     # Full-resolution photos are ~12 MP (~36 MB decoded) and an area can have
     # ~1000 of them, so they're kept on disk and loaded one at a time.
@@ -285,7 +286,6 @@ def _apply_textures(
 ) -> trimesh.Trimesh:
     # sky only: masked, never painted over (inpainting sky into a facade photo makes nothing)
     fill_obstructions = fill_obstructions and not sky_only
-    mask_classes = SKY_NAMES if sky_only else None
     center_lon = (bbox.min_lon + bbox.max_lon) / 2
     center_lat = (bbox.min_lat + bbox.max_lat) / 2
     transformer = _get_utm_transformer(center_lon, center_lat)
@@ -387,34 +387,36 @@ def _apply_textures(
                 if seg is not None:
                     labels = (seg, cached_labels)
                     reused["class maps"] += 1
-            if fill_obstructions:
-                img = remove_obstructions(img, seg_model, seg_device, reporter, labels)
-            else:
+            if sky_only:
                 mask = build_obstruction_mask(
-                    img,
-                    seg_model,
-                    seg_device,
-                    reporter,
-                    labels,
-                    **({"classes": mask_classes} if mask_classes else {}),
+                    img, seg_model, seg_device, reporter, labels, classes=SKY_NAMES
                 )
-                small_mask = cv2.resize(
-                    mask,
-                    (
-                        max(1, mask.shape[1] // MASK_SCALE),
-                        max(1, mask.shape[0] // MASK_SCALE),
-                    ),
-                    interpolation=cv2.INTER_AREA,
+            else:
+                # one segmentation for both masks: the obstructions, and the sky
+                if labels is None:
+                    labels = photo_labels(img, seg_model, seg_device, reporter)
+                obstructions = build_obstruction_mask(
+                    img, seg_model, seg_device, reporter, labels
                 )
-                if preview_dir is not None:
-                    shaded = img.copy()
-                    shaded[mask > 0] = (0.4 * shaded[mask > 0]).astype(np.uint8)
-                    img_for_preview = shaded
+                mask = build_obstruction_mask(
+                    img, seg_model, seg_device, reporter, labels, classes=SKY_NAMES
+                )
+                if fill_obstructions:  # painted over; the sky stays masked
+                    img = synthesize_texture(img, obstructions, reporter, seg_device)
+                else:
+                    mask = np.maximum(mask, obstructions)
+            small_mask = cv2.resize(
+                mask,
+                (
+                    max(1, mask.shape[1] // MASK_SCALE),
+                    max(1, mask.shape[0] // MASK_SCALE),
+                ),
+                interpolation=cv2.INTER_AREA,
+            )
             if preview_dir is not None:
-                _save_preview(
-                    img if fill_obstructions else img_for_preview,
-                    preview_dir / f"{img_id}_cleaned.jpg",
-                )
+                shaded = img.copy()  # what is masked, darkened
+                shaded[mask > 0] = (0.4 * shaded[mask > 0]).astype(np.uint8)
+                _save_preview(shaded, preview_dir / f"{img_id}_cleaned.jpg")
         if preview_dir is not None:
             yaw = meta.get("yaw")
             saved.append(
@@ -426,7 +428,7 @@ def _apply_textures(
                 }
             )
         # the reconstruction's lens taken out: a pinhole photo (and obstruction mask) from here on
-        cam_mask = small_mask if remove_obs and not fill_obstructions else None
+        cam_mask = small_mask if remove_obs else None
         focal_px = meta["focal_length_pixels"]
         und = undistorter(meta, img.shape[1], img.shape[0])
         if und is not None:
