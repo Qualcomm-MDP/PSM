@@ -653,9 +653,12 @@ let textureMode = "rgba";
 try {
   if (localStorage.getItem("psm-texture-mode") === "rgb") textureMode = "rgb";
 } catch {}
-$("textureMode")
-  .querySelectorAll("button")
-  .forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === textureMode)));
+function renderTextureToggle() {
+  const input = $("textureModeInput");
+  input.checked = textureMode === "rgba";
+  $("textureModeState").textContent = input.disabled ? "N/A" : input.checked ? "ON" : "OFF";
+}
+renderTextureToggle();
 
 function modelMaterials(obj) {
   const out = [];
@@ -686,11 +689,12 @@ function applyTextureMode() {
     m.needsUpdate = true; // transparency and alphaTest are compiled into the shader
   }
 }
-segmented("textureMode", (v) => {
-  textureMode = v;
+$("textureModeInput").addEventListener("change", (e) => {
+  textureMode = e.target.checked ? "rgba" : "rgb";
   try {
-    localStorage.setItem("psm-texture-mode", v);
+    localStorage.setItem("psm-texture-mode", textureMode);
   } catch {}
+  renderTextureToggle();
   applyTextureMode();
 });
 
@@ -730,7 +734,14 @@ async function loadModel(job) {
         if ("metalness" in m && !m.metalnessMap) m.metalness = 0;
       }
     });
-    $("textureMode").hidden = !rememberAlpha(model);
+    // Always shown once a model is up; greyed out when it has no confidence (alpha) channel.
+    const hasAlpha = rememberAlpha(model);
+    $("textureMode").hidden = false;
+    $("textureModeInput").disabled = !hasAlpha;
+    $("textureMode").title = hasAlpha
+      ? "ON (RGBA): blend textures by their alpha (confidence) channel. OFF (RGB): ignore alpha and draw textures fully opaque."
+      : "This model has no confidence (alpha) channel, so there is nothing to toggle.";
+    renderTextureToggle();
     applyTextureMode();
     scene.add(model);
     frameModel();

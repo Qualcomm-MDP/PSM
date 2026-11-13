@@ -218,6 +218,14 @@ nav.tabs a[aria-current="page"] { color: var(--fg); background: var(--surface); 
   font-size: 12.5px; font-weight: 500; color: var(--muted);
 }
 .segmented button:hover:not([disabled]):not([aria-pressed="true"]) { color: var(--fg); }
+/* "Confidence labels" on/off pill in the preview toolbar; the whole pill is clickable. */
+.stage-tools .conf-toggle { gap: 10px; padding: 6px 12px; cursor: pointer; user-select: none; white-space: nowrap; }
+.conf-toggle .switch { width: 36px; height: 20px; }
+.conf-toggle .switch .knob { width: 14px; height: 14px; }
+.conf-toggle .switch input:checked ~ .knob { transform: translateX(16px); }
+.conf-toggle .conf-state { min-width: 2.2em; font: 600 12px/1 var(--font-mono); color: var(--muted); }
+.conf-toggle:has(input:checked) .conf-state { color: var(--accent); }
+.conf-toggle:has(input:disabled) { cursor: not-allowed; opacity: .6; }
 .segmented button[aria-pressed="true"] { background: var(--raised); color: var(--fg); box-shadow: 0 1px 2px rgb(0 0 0 / .12); }
 
 .btn {
