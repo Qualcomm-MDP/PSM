@@ -644,6 +644,56 @@ $("captureForm").addEventListener("submit", async (e) => {
   }
 });
 
+// ---------- Texture channels: RGBA (blend by alpha) or RGB (ignore alpha) ----------
+// The textured overlay's alpha holds per-face confidence (glTF alphaMode BLEND,
+// which three.js loads as transparent). RGB draws the same textures opaque,
+// showing only their colour channels. Each material's own alpha settings are
+// kept so RGBA restores exactly what the .glb asked for.
+let textureMode = "rgba";
+try {
+  if (localStorage.getItem("psm-texture-mode") === "rgb") textureMode = "rgb";
+} catch {}
+$("textureMode")
+  .querySelectorAll("button")
+  .forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === textureMode)));
+
+function modelMaterials(obj) {
+  const out = [];
+  obj.traverse((o) => {
+    const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+    out.push(...mats);
+  });
+  return out;
+}
+// Returns whether any material uses alpha, i.e. whether the toggle changes anything.
+function rememberAlpha(obj) {
+  let usesAlpha = false;
+  for (const m of modelMaterials(obj)) {
+    m.userData.alpha = { transparent: m.transparent, alphaTest: m.alphaTest, depthWrite: m.depthWrite };
+    if (m.transparent || m.alphaTest > 0) usesAlpha = true;
+  }
+  return usesAlpha;
+}
+function applyTextureMode() {
+  if (!model) return;
+  const rgb = textureMode === "rgb";
+  for (const m of modelMaterials(model)) {
+    const a = m.userData.alpha;
+    if (!a) continue;
+    m.transparent = rgb ? false : a.transparent;
+    m.alphaTest = rgb ? 0 : a.alphaTest;
+    m.depthWrite = rgb ? true : a.depthWrite;
+    m.needsUpdate = true; // transparency and alphaTest are compiled into the shader
+  }
+}
+segmented("textureMode", (v) => {
+  textureMode = v;
+  try {
+    localStorage.setItem("psm-texture-mode", v);
+  } catch {}
+  applyTextureMode();
+});
+
 async function loadModel(job) {
   // Only the latest request may change the scene: switching jobs quickly can
   // make an older model (or its error) arrive after the newer one.
@@ -680,6 +730,8 @@ async function loadModel(job) {
         if ("metalness" in m && !m.metalnessMap) m.metalness = 0;
       }
     });
+    $("textureMode").hidden = !rememberAlpha(model);
+    applyTextureMode();
     scene.add(model);
     frameModel();
     captureBtn.hidden = false;

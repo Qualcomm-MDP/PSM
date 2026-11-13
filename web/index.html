@@ -196,6 +196,12 @@
         </div>
         <div class="stage-placeholder" id="stagePlaceholder" hidden>Preview is open in a larger window</div>
         <div class="stage-tools" id="stageTools">
+          <div class="segmented" role="group" aria-labelledby="textureModeLabel" id="textureMode" hidden
+            title="Confidence labels ON (RGBA): blend textures by their alpha (confidence) channel. OFF (RGB): ignore alpha and draw textures fully opaque.">
+            <span class="segmented-label" id="textureModeLabel">Confidence labels</span>
+            <button type="button" aria-pressed="false" data-v="rgb">OFF · RGB</button>
+            <button type="button" aria-pressed="true" data-v="rgba">ON · RGBA</button>
+          </div>
           <button class="btn" id="showCameras" type="button" aria-pressed="false" hidden
             title="The photos' camera positions: green aligned, orange Mapillary computed, red raw GPS">Cameras</button>
           <button class="btn" id="showPoints" type="button" aria-pressed="false" hidden
