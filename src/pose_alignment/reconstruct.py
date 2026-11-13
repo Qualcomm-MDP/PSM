@@ -22,10 +22,14 @@ Per leg and sequence:
      Mapillary's focal differs by more than 10%. With --calibration mapillary: RADIAL from
      Mapillary's focal, k1 and k2 (calibrate.py --calibration mapillary first). Crops of a 360
      camera: their exact focal, no distortion, held fixed (nothing for bundle adjustment to refine).
-  3. ALIKED keypoints, matched between each frame and its next 10, imported into COLMAP. Frames
-     under 6 m apart (median, Mapillary positions): mutual nearest neighbour of the descriptors
-     (nn_features.py, seconds per leg); further apart: LightGlue (~15x slower, but it holds the
-     larger changes between neighbouring frames). --matcher nn|lightglue forces one.
+  3. ALIKED keypoints (learned_features.py), matched by mutual nearest neighbour of the descriptors
+     with a ratio test, imported into COLMAP. Each frame is matched with its next 6 frames (RANSAC
+     gives up after 2000 tries) where frames are under 6 m apart (median, Mapillary positions), and
+     with its next 10 (10000 tries) further apart, where the further neighbours hold the leg
+     together. Compared on 8 ROIs (SIFT, ALIKED + LightGlue, ALIKED + nearest neighbour, all aligned
+     the same way): nearest neighbour placed every frame on the widely spaced ROIs with these
+     pairs, held a motorcycle's fisheye rig together where SIFT's models twisted, and took about
+     half LightGlue's time for nearly the same wall fits.
   4. Gravity priors: GeoCalib's per-frame gravity in the database's pose_priors table (no
      position: GPS is not used here). COLMAP expects the gravity as the downward direction in the
      camera frame (-up_cam) and aligns the model's +y axis with it: checked on roi_2, where the
@@ -39,6 +43,21 @@ Per leg and sequence:
      the leg is solved again with COLMAP's incremental mapper on the same matches, and that model
      is kept when it holds capture order with at least 90% of GLOMAP's frames
      (legs.json: mapper_used, mapper_fallback). --mapper incremental uses it from the start.
+  5b. --hold-focal-drop F (e.g. 0.05): after the passes above, every camera whose final focal came
+     out more than F below GeoCalib's (as a fraction of it) is solved again on its own features and
+     matches with the focal held at GeoCalib's and the distortion refined (legs.json: focal_held).
+     On forward-moving legs the refined focal can shrink, which stretches the model across the
+     street against its length: roi_27 (SIFT) refined 0.681 against GeoCalib's 0.800, its street
+     ~20% wider than OSM's; held, its facades on both sides met their walls. A refined focal at or
+     above GeoCalib's is kept (roi_19 0.813/0.799, roi_22 0.814/0.757 were no better held). Not for
+     wide-angle lenses (the RADIAL_FISHEYE model: its focal is not GeoCalib's simple-radial one, and
+     GeoCalib's own estimate is least sure there) nor for cameras whose GeoCalib calibration looks
+     unreliable (geo_common.calibration_unreliable: roi_11's Suzuki rig, 0.57-0.78 for one lens);
+     legs.json: focal_rule_skipped.
+  5c. A leg solved again because the frames it shares with the next leg did not reconstruct well
+     reuses its own features, matches and masks (stage "subset": the database as it is, the mapper
+     given the remaining frames) instead of extracting and matching again (roi_23 with SIFT: ~80 s
+     of repeated extraction).
   6. Weak frames (only with --split-weak; off by default): frames left with under 0.35 x the
      leg's median number of 3D observations (e.g. a parked truck filling the view) are dropped
      and the leg solved again without them, and align.py fits each side of such a gap
@@ -66,10 +85,13 @@ from .geo_common import (
     MASK_SKY_OR_MOVING,
     LocalFrame,
     RoiPaths,
+    calibration_unreliable,
     load_cameras,
     mapillary_calibration,
     model_size,
     module_command,
+    plan_onto,
+    steps_against_track,
     straight_stretches,
 )
 
@@ -97,26 +119,34 @@ INCREMENTAL = [
     "--Mapper.init_max_forward_motion",
     0.99,
 ]
-MATCHERS = {"nn": "nearest-neighbour matching", "lightglue": "LightGlue"}
-# COLMAP's mappers pick a random seed from the clock unless given one; a fixed seed makes a rerun give
-# the same model, so two runs differ only by what was changed (roi_24: one leg's wall fit 0.62 m in one
-# run, 0.84 m in the next with the same settings). --seed changes it
+# COLMAP's mappers, its geometric verification (RANSAC per frame pair) and the re-triangulation each pick a
+# random seed from the clock unless given one (TwoViewGeometry.random_seed and Mapper.random_seed default
+# to -1); a fixed seed makes a rerun give the same model, so two runs differ only by what was changed
+# (roi_24: one leg's wall fit 0.62 m in one run, 0.84 m in the next; roi_19 leg04 unseeded: models 1.1 m
+# apart, placed 1.5 / 3.1 / 6.1 deg off). --seed changes it
 SEED = {"value": 0}
-# Matching, per matcher: each frame with its next "overlap" frames ("look-ahead"); COLMAP's geometric
-# verification (RANSAC) gives up on a pair after "ransac_trials" tries (COLMAP's default 10000).
-# Frames close together (nearest-neighbour matching, under NN_MAX_SPACING m apart): 6 and 2000; 6 frames
-# still reach ~18 m ahead at 3 m spacing. roi_13: 59 s and 29 s faster, same reliable frames, fits
-# within ~0.2 m. Frames far apart (LightGlue) keep 10 and 10000: there the further neighbours hold the
-# leg together (roi_19 with 6: all three legs 0.2-0.45 m worse; with 2000: two legs 0.2-0.3 m worse)
+# the mappers and the re-triangulation on one thread: with several, bundle adjustment's floating-point sums
+# come out in a different order each run and the models drift apart (roi_27: identical matches, 4980 vs
+# 4996 points); these steps take seconds per leg. Seeded and single-threaded, two runs agree within ~5 cm
+MAPPER_THREADS = 1
+
+
+def features_label():
+    return "ALIKED + nearest-neighbour matching"
+
+
+# Matching: each frame with its next "overlap" frames ("look-ahead"); COLMAP's geometric verification
+# (RANSAC) gives up on a pair after "ransac_trials" tries (COLMAP's default 10000). Frames close together
+# (under NN_MAX_SPACING m apart, "near"): 6 and 2000; 6 frames still reach ~18 m ahead at 3 m spacing.
+# roi_13: 59 s and 29 s faster, same reliable frames, fits within ~0.2 m. Frames far apart ("far") keep 10
+# and 10000: there the further neighbours hold the leg together (roi_19 with 6: all three legs 0.2-0.45 m
+# worse; with 2000: two legs 0.2-0.3 m worse)
 MATCH = {
-    "nn": {"overlap": 6, "ransac_trials": 2000},
-    "lightglue": {"overlap": 10, "ransac_trials": 10000},
+    "near": {"overlap": 6, "ransac_trials": 2000},
+    "far": {"overlap": 10, "ransac_trials": 10000},
 }
 SHARED_FOCAL_TOL = 0.01  # a leg camera whose own refined focal is this close to the shared one is not solved again
-# Nearest-neighbour matching is ~15x faster than LightGlue and as good on frames up to ~5.6 m
-# apart (roi_2, 7, 8, 11, main_street_east); on frames 8-10 m apart (roi_4, 5, 9) it finds too
-# few matches between neighbours and the reconstruction becomes unstable (bends, lost frames)
-NN_MAX_SPACING = 6.0  # metres between frames
+NN_MAX_SPACING = 6.0  # metres between frames: "near" pairs below, "far" pairs above
 WEAK_RATIO = 0.35  # frames under this x the leg's median 3D observations are dropped
 CALIBRATION_NAMES = {"mapillary": "Mapillary", "pano": "the 360 crop (exact, fixed)"}
 DISAGREE = (
@@ -518,12 +548,20 @@ def observations_per_image(model_txt):
     }
 
 
-def cameras_out_of_order(model_txt):
-    """Frames placed behind an earlier one along the leg: a step against the direction from the first
-    to the last camera of more than a third of a normal step (as align.py's reliability check)."""
+def cameras_out_of_order(model_txt, meta=None):
+    """Frames placed behind an earlier one along the leg. With meta (the frames' Mapillary data by
+    file name), judged against their GPS track (geo_common.steps_against_track): a step back counts
+    only where the track moves on, so a capture that really turns back (a walker's U-turn on a
+    campus path) is not taken for a folded reconstruction. Without it, a step against the direction
+    from the first to the last camera of more than a third of a normal step."""
     names, C, _ = load_cameras(model_txt)
     if len(names) < 3:
         return []
+    keys = [Path(n).name for n in names]
+    if meta and all(k in meta for k in keys):
+        f0 = LocalFrame(meta[keys[0]]["lon"], meta[keys[0]]["lat"])
+        G = np.array([f0.xy(meta[k]["lon"], meta[k]["lat"]) for k in keys])
+        return [names[i] for i in steps_against_track(plan_onto(C, G), G)]
     d = C[-1] - C[0]
     steps = np.diff((C - C[0]) @ (d / max(np.linalg.norm(d), 1e-12)))
     return [names[i + 1] for i in np.flatnonzero(steps < -np.median(np.abs(steps)) / 3)]
@@ -565,7 +603,7 @@ def reconstruct_camera(
     cam,
     overlays,
     log_prefix,
-    matcher="auto",
+    matcher="nn",
     split_weak=False,
     mapper="global",
     refine="all",
@@ -597,7 +635,12 @@ def reconstruct_camera(
         work / "database.db",
     )
     reuse = reuse and db.exists()
-    if reuse:
+    subset = (
+        stage == "subset" and db.exists()
+    )  # solved again on fewer frames: the database as it is
+    if stage == "subset" and not subset:
+        stage = "all"
+    if reuse or subset:
         for d in (sparse, work / "sparse_global"):
             shutil.rmtree(d, ignore_errors=True)
         sparse.mkdir()
@@ -644,9 +687,10 @@ def reconstruct_camera(
             flush=True,
         )
     spacing = frame_spacing(p, folder, cam["frame_files"])
-    if matcher == "auto":
-        matcher = "nn" if spacing < NN_MAX_SPACING else "lightglue"
-    cam.update(matcher=matcher, frame_spacing_m=round(spacing, 2))
+    # ALIKED + nearest neighbour always; the look-ahead and RANSAC trials by the frame spacing
+    matcher = "nn"
+    pk = "near" if spacing < NN_MAX_SPACING else "far"
+    cam.update(matcher=matcher, frame_spacing_m=round(spacing, 2), pairs_as=pk)
     if reuse:
         print(
             f"{log_prefix}: solving again with the focal held at {focal:.3f} of the long side "
@@ -655,10 +699,17 @@ def reconstruct_camera(
         )
         set_camera_params(db, cparams)
         n_priors = count_priors(db)
+    elif subset:
+        print(
+            f"{log_prefix}: solving again on {cam['frames']} frames with the features and matches already "
+            f"found, {mapper} mapper",
+            flush=True,
+        )
+        n_priors = count_priors(db)
     else:
         if stage != "solve":
             print(
-                f"{log_prefix}: {cam['frames']} frames {spacing:.1f} m apart, ALIKED + {MATCHERS[matcher]}, "
+                f"{log_prefix}: {cam['frames']} frames {spacing:.1f} m apart, {features_label()}, "
                 f"{cmodel} from {CALIBRATION_NAMES.get(cinfo['source'], 'GeoCalib')}, {mapper} mapper",
                 flush=True,
             )
@@ -670,7 +721,7 @@ def reconstruct_camera(
                 "images": str(images),
                 "out": str(work / "learned"),
                 "masks": str(masks),
-                "overlap": MATCH[matcher]["overlap"],
+                "overlap": MATCH[pk]["overlap"],
                 "matcher": matcher,
             }
         if stage == "solve":
@@ -685,7 +736,7 @@ def reconstruct_camera(
                 "--out",
                 work / "learned",
                 "--overlap",
-                MATCH[matcher]["overlap"],
+                MATCH[pk]["overlap"],
                 "--masks",
                 masks,
                 "--matcher",
@@ -719,7 +770,9 @@ def reconstruct_camera(
             "--FeatureMatching.use_gpu",
             0,
             "--TwoViewGeometry.max_num_trials",
-            MATCH[matcher]["ransac_trials"],
+            MATCH[pk]["ransac_trials"],
+            "--TwoViewGeometry.random_seed",
+            SEED["value"],
         )
         gravity = {
             n: (-np.array(v["up_cam"])).tolist()
@@ -748,6 +801,12 @@ def reconstruct_camera(
                 1,
                 "--GlobalMapper.random_seed",
                 SEED["value"],
+                "--GlobalMapper.num_threads",
+                MAPPER_THREADS,
+                "--GlobalMapper.ba_ceres_use_gpu",
+                0,
+                "--GlobalMapper.gp_use_gpu",
+                0,
                 "--GlobalMapper.ba_refine_focal_length",
                 int(refine_focal),
                 "--GlobalMapper.ba_refine_extra_params",
@@ -773,6 +832,8 @@ def reconstruct_camera(
                 *INCREMENTAL,
                 "--Mapper.random_seed",
                 SEED["value"],
+                "--Mapper.num_threads",
+                MAPPER_THREADS,
                 *(["--Mapper.image_list_path", image_list] if image_list else []),
             )
         tick("mapper" if use == mapper else "mapper_fallback", t0)
@@ -796,6 +857,10 @@ def reconstruct_camera(
                 "--refine_intrinsics",
                 0,
                 *RELAXED_TRI,
+                "--Mapper.random_seed",
+                SEED["value"],
+                "--Mapper.num_threads",
+                MAPPER_THREADS,
             )
             shutil.rmtree(model)
             retri.rename(model)
@@ -816,7 +881,7 @@ def reconstruct_camera(
 
     core, weak_out, weak_info = weak_ends(db, [[n] for n in cam["frame_files"]])
     image_list = None
-    if weak_out:
+    if weak_out or subset:  # a subset solve names its frames: the database holds more
         image_list = work / "image_list_core.txt"
         image_list.write_text("\n".join(core) + "\n")
         if not reuse:
@@ -856,7 +921,7 @@ def reconstruct_camera(
         # mapper places each frame against the points already built and keeps capture order, but
         # elsewhere GLOMAP is often better (roi_10, roi_5). So: GLOMAP, and the incremental mapper on
         # the same matches only where GLOMAP's cameras come out of order.
-        behind = cameras_out_of_order(model / "txt")
+        behind = cameras_out_of_order(model / "txt", p.frames(folder))
         if behind:
             n_global = model_size(model)
             print(
@@ -869,7 +934,7 @@ def reconstruct_camera(
             sparse.rename(kept)
             model2, pieces2 = solve(image_list, "incremental")
             behind2 = (
-                cameras_out_of_order(model2 / "txt")
+                cameras_out_of_order(model2 / "txt", p.frames(folder))
                 if model2 is not None and model_size(model2) >= 3
                 else None
             )
@@ -1170,7 +1235,7 @@ def reconstruct_rig(
     members,
     ref,
     overlays,
-    matcher="auto",
+    matcher="nn",
     mapper="global",
     refine="all",
     focal=None,
@@ -1208,7 +1273,12 @@ def reconstruct_rig(
         work / "database.db",
     )
     reuse = reuse and db.exists()
-    keep_files = reuse or stage == "solve"
+    subset = (
+        stage == "subset" and db.exists()
+    )  # solved again on fewer frames: the database as it is
+    if stage == "subset" and not subset:
+        stage = "all"
+    keep_files = reuse or subset or stage == "solve"
     for d in (
         (sparse, work / "sparse_global", work / "split")
         if keep_files
@@ -1283,16 +1353,17 @@ def reconstruct_rig(
         )
     (work / "rig_config.json").write_text(json.dumps([{"cameras": config}], indent=1))
     spacing = frame_spacing(p, ref["folder"], ref["frame_files"])
-    if matcher == "auto":
-        matcher = "nn" if spacing < NN_MAX_SPACING else "lightglue"
-    pairs = rig_pairs(members, p, MATCH[matcher]["overlap"])
+    # ALIKED + nearest neighbour always; the look-ahead and RANSAC trials by the frame spacing
+    matcher = "nn"
+    pk = "near" if spacing < NN_MAX_SPACING else "far"
+    pairs = rig_pairs(members, p, MATCH[pk]["overlap"])
     (work / "pairs.txt").write_text("".join(f"{a} {b}\n" for a, b in pairs))
     label = f"{leg['id']}/rig"
     if stage != "solve":
         print(
             f"{label}: {len(members)} cameras ({', '.join(c['folder'] for c, _, _ in members)}), "
             f"{sum(len(n) for _, n, _ in members)} images in {len({Path(x).name for _, n, _ in members for x in n.values()})} rig frames, "
-            f"{len(pairs)} pairs, ALIKED + {MATCHERS[matcher]}, {mapper} mapper",
+            f"{len(pairs)} pairs, {features_label()}, {mapper} mapper",
             flush=True,
         )
     tick("prepare", t_start)
@@ -1317,6 +1388,8 @@ def reconstruct_rig(
             "--rig_config_path",
             work / "rig_config.json",
         )
+        n_priors = count_priors(db)
+    elif subset:
         n_priors = count_priors(db)
     else:
         if stage == "all":
@@ -1366,7 +1439,9 @@ def reconstruct_rig(
             "--FeatureMatching.use_gpu",
             0,
             "--TwoViewGeometry.max_num_trials",
-            MATCH[matcher]["ransac_trials"],
+            MATCH[pk]["ransac_trials"],
+            "--TwoViewGeometry.random_seed",
+            SEED["value"],
         )
         n_priors = write_gravity_priors(db, gravity)
     tick("features_matching", t0)
@@ -1381,7 +1456,7 @@ def reconstruct_rig(
             by_time.setdefault(int(Path(x).stem), []).append(x)
     core, weak_out, weak_info = weak_ends(db, [by_time[k] for k in sorted(by_time)])
     rig_list = None
-    if weak_out:
+    if weak_out or subset:  # a subset solve names its frames: the database holds more
         rig_list = work / "image_list_core.txt"
         rig_list.write_text("\n".join(core) + "\n")
         if not reuse:
@@ -1415,6 +1490,12 @@ def reconstruct_rig(
                 1,
                 "--GlobalMapper.random_seed",
                 SEED["value"],
+                "--GlobalMapper.num_threads",
+                MAPPER_THREADS,
+                "--GlobalMapper.ba_ceres_use_gpu",
+                0,
+                "--GlobalMapper.gp_use_gpu",
+                0,
                 "--GlobalMapper.ba_refine_focal_length",
                 int(refine_focal),
                 "--GlobalMapper.ba_refine_extra_params",
@@ -1444,6 +1525,8 @@ def reconstruct_rig(
                 *INCREMENTAL,
                 "--Mapper.random_seed",
                 SEED["value"],
+                "--Mapper.num_threads",
+                MAPPER_THREADS,
                 *(["--Mapper.image_list_path", rig_list] if rig_list else []),
             )
 
@@ -1516,6 +1599,10 @@ def reconstruct_rig(
                 "--refine_intrinsics",
                 0,
                 *RELAXED_TRI,
+                "--Mapper.random_seed",
+                SEED["value"],
+                "--Mapper.num_threads",
+                MAPPER_THREADS,
             )
             shutil.rmtree(model)
             retri.rename(model)
@@ -1540,7 +1627,11 @@ def reconstruct_rig(
 
     def order_bad(split):
         d, n = split.get(ref["folder"], (None, 0))
-        return cameras_out_of_order(d) if d is not None and n >= 3 else None
+        return (
+            cameras_out_of_order(d, p.frames(ref["folder"]))
+            if d is not None and n >= 3
+            else None
+        )
 
     model, pieces, split = solve(mapper)
     used, fallback = mapper, None
@@ -1638,7 +1729,7 @@ def overlap_ok(p, leg, frames, max_ratio=1.5):
     if not extra or cam is None or not cam.get("model"):
         return True, ""
     model = p.reconstruction / cam["model"]
-    behind = cameras_out_of_order(model)
+    behind = cameras_out_of_order(model, frames[cam["folder"]])
     if behind:
         return False, f"{len(behind)} cameras behind earlier ones"
     names, C, _ = load_cameras(model)
@@ -1680,7 +1771,7 @@ def reconstruct_roi(
     min_frames=15,
     max_frames=60,
     tag=None,
-    matcher="auto",
+    matcher="nn",
     split_weak=False,
     mapper="global",
     calibration="geocalib",
@@ -1690,6 +1781,7 @@ def reconstruct_roi(
     rig=True,
     leg_overlap=8,
     share_focal=True,
+    hold_focal_drop=None,
 ):
     """Every leg, a leg's rig cameras together (siblings taking frames at the same moments as the
     primary; rig=False, --solo-cameras: each camera on its own, except 360 crops, always a rig). With
@@ -1850,19 +1942,24 @@ def reconstruct_roi(
         solve_leg(leg, refine, stage="prepare", jobs=jobs)
     run_secs["prepare"] = time.time() - t0
     t0 = time.time()
-    jobs_file = p.reconstruction / "feature_jobs.json"
-    jobs_file.write_text(json.dumps(jobs, indent=1))
-    out = run_python(
-        p.reconstruction / "features.log", "learned_features.py", "--jobs", jobs_file
-    )
-    batch = json.loads(out.stdout.strip().splitlines()[-1])
-    run_secs["features_and_matching"] = time.time() - t0
-    doc["features_batch"] = batch
-    print(
-        f"Features: {len(jobs)} leg cameras in one process, {batch['images_extracted']} frames extracted "
-        f"({batch['images_reused']} reused), {run_secs['features_and_matching']:.0f} s",
-        flush=True,
-    )
+    jobs = [j for j in jobs if j]
+    if jobs:
+        jobs_file = p.reconstruction / "feature_jobs.json"
+        jobs_file.write_text(json.dumps(jobs, indent=1))
+        out = run_python(
+            p.reconstruction / "features.log",
+            "learned_features.py",
+            "--jobs",
+            jobs_file,
+        )
+        batch = json.loads(out.stdout.strip().splitlines()[-1])
+        run_secs["features_and_matching"] = time.time() - t0
+        doc["features_batch"] = batch
+        print(
+            f"Features: {len(jobs)} leg cameras in one process, {batch['images_extracted']} frames extracted "
+            f"({batch['images_reused']} reused), {run_secs['features_and_matching']:.0f} s",
+            flush=True,
+        )
     t0 = time.time()
     for leg in legs:
         t1 = time.time()
@@ -1884,7 +1981,7 @@ def reconstruct_roi(
                 cam["frames"] = len(cam["frame_files"])
                 cam.pop("seconds", None)
             leg.update(link_next=[], extra_frames=[], link_dropped=why)
-            solve_leg(leg, refine)
+            solve_leg(leg, refine, stage="subset")
         run_secs[f"first pass {leg['id']}"] = time.time() - t1
     run_secs["first_pass"] = time.time() - t0
 
@@ -1918,6 +2015,83 @@ def reconstruct_roi(
             for leg in legs:
                 solve_leg(leg, "distortion", shared, reuse=True)
             run_secs["shared_focal_pass"] = time.time() - t0
+    if (
+        hold_focal_drop is not None
+        and refine == "all"
+        and focal is None
+        and calibration == "geocalib"
+    ):
+        # a refined focal well below GeoCalib's: solved again with GeoCalib's held (see the docstring)
+        held, skipped = {}, {}
+        unreliable = calibration_unreliable(
+            p,
+            {
+                s["folder"]: json.loads(p.calibration_json(s["folder"]).read_text())
+                for s in sequences
+            },
+        )
+        for leg in legs:
+            for cam in leg["cameras"]:
+                if not cam.get("model") or p.pano(cam["folder"]):
+                    continue
+                if (cam.get("calibration") or {}).get("model") == "RADIAL_FISHEYE":
+                    skipped[cam["folder"]] = "wide-angle lens (fisheye model)"
+                    continue
+                if cam["folder"] in unreliable:
+                    skipped[cam["folder"]] = (
+                        "GeoCalib looks unreliable ("
+                        + "; ".join(unreliable[cam["folder"]])
+                        + ")"
+                    )
+                    continue
+                fn, _, _ = model_focal(p.reconstruction / cam["model"])
+                fg = (cam.get("calibration") or {}).get("geocalib_focal_norm")
+                if fg and fn < (1 - hold_focal_drop) * fg:
+                    held.setdefault(leg["id"], {})[cam["folder"]] = (fn, fg)
+        doc["focal_held"] = {
+            leg_id: {
+                f: {"refined": round(a, 4), "geocalib": round(b, 4)}
+                for f, (a, b) in d.items()
+            }
+            for leg_id, d in held.items()
+        }
+        doc["focal_rule_skipped"] = skipped
+        for f, why in skipped.items():
+            print(f"{f}: focal rule not applied: {why}", flush=True)
+        if held:
+            t0 = time.time()
+            for leg in legs:
+                if leg["id"] not in held:
+                    continue
+                for f, (a, b) in held[leg["id"]].items():
+                    print(
+                        f"{leg['id']}/{f}: refined focal {a:.3f} is {100 * (1 - a / b):.1f}% below GeoCalib's "
+                        f"{b:.3f}; solving again with GeoCalib's held",
+                        flush=True,
+                    )
+                focals = {f: b for f, (_, b) in held[leg["id"]].items()}
+                if len(leg["cameras"]) > 1:
+                    # a rig is solved again as a whole: its other cameras keep their refined focal
+                    for cam in leg["cameras"]:
+                        if (
+                            cam.get("model")
+                            and not p.pano(cam["folder"])
+                            and cam["folder"] not in focals
+                        ):
+                            focals[cam["folder"]] = model_focal(
+                                p.reconstruction / cam["model"]
+                            )[0]
+                for cam in leg["cameras"]:
+                    cam.pop(
+                        "focal_first_pass", None
+                    )  # not compared with the shared focal here
+                solve_leg(leg, "distortion", focals, reuse=True)
+            run_secs["focal_hold_pass"] = time.time() - t0
+        else:
+            print(
+                f"No camera's refined focal is more than {100 * hold_focal_drop:g}% below GeoCalib's; none held",
+                flush=True,
+            )
     run_secs["total"] = time.time() - t_start
     doc["seconds"] = {k: round(v, 1) for k, v in run_secs.items()}
     print(
@@ -1983,8 +2157,8 @@ def main():
     parser.add_argument(
         "--match-overlap",
         type=int,
-        help="Match each frame with its next N frames (default: 6 for frames close together, matched by "
-        "nearest neighbours; 10 for frames further apart, matched by LightGlue)",
+        help="Match each frame with its next N frames (default: 6 for frames under 6 m apart, 10 for "
+        "frames further apart)",
     )
     parser.add_argument(
         "--ransac-trials",
@@ -2016,10 +2190,10 @@ def main():
         "separately (off by default)",
     )
     parser.add_argument(
-        "--matcher",
-        choices=["auto", *MATCHERS],
-        default="auto",
-        help=f"auto (default): nn for frames under {NN_MAX_SPACING:g} m apart, lightglue otherwise",
+        "--hold-focal-drop",
+        type=float,
+        help="Solve again with GeoCalib's focal held every camera whose refined focal came out more than "
+        "this fraction below it (e.g. 0.05)",
     )
     parser.add_argument(
         "--calibration",
@@ -2064,7 +2238,6 @@ def main():
         min_frames=args.min_frames,
         max_frames=args.max_frames,
         tag=args.tag,
-        matcher=args.matcher,
         split_weak=args.split_weak,
         mapper=args.mapper,
         calibration=args.calibration,
@@ -2073,6 +2246,7 @@ def main():
         rig=not args.solo_cameras,
         leg_overlap=args.leg_overlap,
         share_focal=not args.no_shared_focal,
+        hold_focal_drop=args.hold_focal_drop,
         refine="none"
         if args.fix_intrinsics
         else "distortion"

@@ -159,9 +159,10 @@ def test_naip_stage_continues_without_photos_on_failure(
     monkeypatch.setattr(naip_module, "build_ortho", fail)
     state = _state(bbox=BBOX, use_naip=True, terrain=flat_terrain)
 
-    with pytest.warns(UserWarning, match="without aerial photos"):
+    with pytest.warns(UserWarning, match="No aerial photo for this area"):
         assert naip_stage(mesh, state) is mesh
     assert state.get_metadata("naip", None) is None
+    assert "image server down" in state.get_metadata("notices", [])[0]
 
 
 def test_export_drapes_the_photo_on_the_ground(tmp_path, mesh, flat_terrain):

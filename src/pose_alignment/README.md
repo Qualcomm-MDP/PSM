@@ -112,8 +112,7 @@ the first two as `python -m data_ingest.mapillary_sequences` and
         value.
     - **Matching look-ahead and RANSAC tries.** Each frame is matched with its next 6 frames, with
         RANSAC capped at 2000 tries per pair in COLMAP's match checking, when frames are close
-        together (nearest-neighbour matching, under 6 m apart). Frames further apart (LightGlue) keep
-        10 frames and 10,000 tries. `--match-overlap` and `--ransac-trials` override both.
+        together (under 6 m apart). Frames further apart keep 10 frames and 10,000 tries. `--match-overlap` and `--ransac-trials` override both.
         - roi_13: about 1.5 min faster with the same results.
         - roi_19, frames 7.6 m apart: the shorter look-ahead made every leg 0.2–0.45 m worse, so
             widely spaced frames keep the longer one.
@@ -124,8 +123,6 @@ the first two as `python -m data_ingest.mapillary_sequences` and
     rear camera of roi_11 leg01). Forward cameras are never cut. `0` turns this off.
 - **`--split-weak`**: drop weakly anchored frames and fit each side of the gap separately
     (off by default; see the reconstruct stage).
-- **`--matcher`**: `auto` (default) picks nearest-neighbour matching for frames under 6 m
-    apart and LightGlue otherwise; `nn` or `lightglue` forces one.
 - **`--tag t`**: a separate run of reconstruct and align (`data/reconstruction_t`,
     `data/alignment_t`, `results/t`); the calibration is shared.
 - The mapillary stage always writes a new `outputs/alignment/mapillary_roi_N` folder; `--view right`
@@ -239,12 +236,12 @@ Per leg and camera:
 2. **Camera:** one per sequence from GeoCalib's focal. Strongly distorted lenses (GeoCalib
     k1 below −0.2, e.g. action cameras) use COLMAP's `RADIAL_FISHEYE` model, others
     `RADIAL`. Bundle adjustment refines it.
-3. **Features:** ALIKED keypoints, each frame matched with its next 10:
-    - frames under 6 m apart: mutual nearest neighbour of the descriptors (`nn_features.py`),
-        2–6 s per leg;
-    - 6 m and over: LightGlue (`learned_features.py`), about 15× slower. With
-        nearest-neighbour, sequences 8–10 m apart (roi_4, 5, 9, 19) reconstructed unstably
-        (bent, crushed or lost frames).
+3. **Features:** ALIKED keypoints matched by mutual nearest neighbour of the descriptors
+    (`learned_features.py`), each frame with its next 6 frames when frames are under 6 m apart
+    and its next 10 further apart (the longer look-ahead holds widely spaced legs together).
+    Compared with SIFT and with ALIKED + LightGlue on 8 ROIs, aligned the same way, it placed
+    every frame on the widely spaced ROIs, held a motorcycle's fisheye rig together where
+    SIFT's models twisted, and took about half LightGlue's time for nearly the same wall fits.
 4. **Gravity priors:** GeoCalib's down direction per frame goes into COLMAP's pose priors
     (no positions: GPS is not used).
 5. **COLMAP 4.2 `global_mapper`** (GLOMAP) with gravity-aided rotation averaging, then
@@ -271,11 +268,19 @@ Per leg and camera:
 2. **Ground:** median height of the road points near the path.
 3. **Building points:** labelled Building, seen in 3+ frames, 2.5–40 m up, thinned to one
     per 0.5 m.
-4. **Fit:** one 2D similarity (heading, scale, position) placing the building points as close
-    as possible to the OSM footprint edges: a global search around Mapillary's positions,
-    then a robust refinement. Every building point counts, including side walls, corners and
-    gaps, which is what pins the position along the street. GPS gives the starting placement
-    and weak priors only.
+4. **Fit:** the leg is turned and shifted (never stretched: the scale stays the GPS
+    track's) to place the building points as close as possible to the OSM footprint edges: a
+    global search around the GPS placement, then a robust refinement. Points on facade lines
+    are matched to walls of their own direction, the rest to the nearest wall at half weight,
+    within 20 m of the direction-matched placement (`--walls hybrid`). The heading comes from
+    the facade directions where they give a clear answer (`--heading facades`). The GPS track
+    is Mapillary's computed positions, or the measured GPS for a leg whose computed track looks
+    broken (`--gps auto`). A leg whose reconstruction folded (cameras placed back along the
+    GPS track while the capture moved on; a walker's U-turn goes back on the track too and is
+    no fold) or jumped (a camera step several times the GPS step, e.g. frames placed 12 m to
+    the side) keeps its longest clean stretch. The cameras cut off are placed again by PnP
+    from the kept part of the model where that agrees with the GPS steps; otherwise a frame
+    a neighbouring leg shares keeps that leg's pose, and the rest Mapillary's.
 5. **Pieces (only with `--split-weak`):** where weak frames were dropped, each side of the
     gap gets its own fit; the output is still one leg.
 6. **Reliable** when the building points end within 2 m (median, `--max-error`) of the
@@ -325,8 +330,8 @@ Each shows one camera's reconstruction after alignment: a plan view of the build
 (red), other points (blue) and road points (grey) over the OSM footprints with the camera
 path in black, and the same in 3D against the footprints extruded to their OSM heights.
 
-Typical time for 80–100 frames: about 5 minutes (GeoCalib 1 min, LightGlue matching 2.5
-min when used, COLMAP 0.5 min, alignment 0.3 min).
+Typical time for 80–100 frames: a few minutes (GeoCalib about 1 min, ALIKED with
+nearest-neighbour matching under 1 min on a GPU, COLMAP 0.5–1 min, alignment 0.3 min).
 
 ## Limits
 

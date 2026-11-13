@@ -35,6 +35,7 @@ DEFAULTS: dict[str, Any] = {
     "poses": "colmap",
     "remove_obstructions": True,
     "fill_obstructions": True,
+    "sky_only": False,
     "seg_model": "large",
     "device": "auto",
 }

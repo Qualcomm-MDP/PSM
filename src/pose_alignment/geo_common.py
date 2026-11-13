@@ -480,3 +480,75 @@ def segment_distances(P, A, B):
         1,
     )
     return np.linalg.norm(P[:, None] - (A + t[..., None] * d), axis=2)
+
+
+RIG_SPREAD = 0.15  # rig cameras' GeoCalib focals further apart than this: unreliable
+
+
+def calibration_unreliable(p, docs):
+    """{sequence folder: [reasons]} for GeoCalib calibrations that look unreliable: the optimiser
+    did not converge on most sampled frames, or rig siblings (same make, model and image size, so
+    the same lens) got focals more than RIG_SPREAD apart. Both happen with lenses wider than
+    GeoCalib's model holds (roi_21's Roush rig: 0.42-0.65 for six identical cameras; a Suzuki
+    motorcycle rig 0.57-0.78). docs: {folder: its calibration json}."""
+    reasons: dict[str, list[str]] = {}
+    for folder, d in docs.items():
+        n = len(d.get("sample_frames", []))
+        if (
+            d.get("source", "geocalib") == "geocalib"
+            and n
+            and d.get("sample_not_converged", 0) > n / 2
+        ):
+            reasons.setdefault(folder, []).append(
+                f"no convergence on {d['sample_not_converged']}/{n} sampled frames"
+            )
+    rigs: dict[tuple, list[str]] = {}
+    for folder, d in docs.items():
+        f0 = next(iter(p.frames(folder).values()))
+        rigs.setdefault(
+            (f0.get("make"), f0.get("model"), d["width"], d["height"]), []
+        ).append(folder)
+    for (make, model, *_), folders in rigs.items():
+        focals = [docs[f]["focal_norm"] for f in folders]
+        if len(folders) > 1 and max(focals) / min(focals) - 1 > RIG_SPREAD:
+            for f in folders:
+                reasons.setdefault(f, []).append(
+                    f"{len(folders)} {make} {model} rig cameras got focals "
+                    f"{min(focals):.2f}-{max(focals):.2f}"
+                )
+    return reasons
+
+
+def plan_onto(C, G):
+    """Camera positions C (n x 3 model or n x 2 plan) laid onto their GPS track G (n x 2 metres):
+    the plane of C's two main directions, then the 2D similarity (a reflection allowed) mapping it
+    best onto G. Only for comparing directions of travel, not for placing a model."""
+    X = np.asarray(C, float) - np.mean(C, axis=0)
+    if X.shape[1] > 2:
+        X = X @ np.linalg.svd(X, full_matrices=False)[2][:2].T
+    G = np.asarray(G, float)
+    Y = G - G.mean(axis=0)
+    U, S, Vt = np.linalg.svd(X.T @ Y)
+    s = S.sum() / max(float((X**2).sum()), 1e-12)
+    return s * X @ (U @ Vt) + G.mean(axis=0)
+
+
+def steps_against_track(P, G, window=2):
+    """Indices of the cameras (1 .. n-1) placed behind the one before them against the GPS track:
+    P and G (n x 2) in one frame (plan_onto). A camera counts when its step from the previous one
+    goes back, by more than a third of a normal step, along the track's local direction (G over
+    window frames each side). A walk that turns back on itself goes back on the track too, so its
+    U-turn is not counted; only a stretch the reconstruction slid back while the capture moved on."""
+    P, G = np.asarray(P, float), np.asarray(G, float)
+    n = len(P)
+    m = np.diff(P, axis=0)
+    med = float(np.median(np.linalg.norm(m, axis=1))) if n > 1 else 0.0
+    out = []
+    for i in range(n - 1):
+        g = G[min(i + 1 + window, n - 1)] - G[max(i - window, 0)]
+        length = float(np.linalg.norm(g))
+        if length < 1e-6 or med <= 0:
+            continue
+        if m[i] @ (g / length) < -med / 3:
+            out.append(i + 1)
+    return out

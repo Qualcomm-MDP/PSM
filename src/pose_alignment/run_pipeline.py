@@ -7,10 +7,13 @@ Stages, in order (each is also its own script):
   segmentation  segmentation/street_masks.py   Mask2Former building/road masks -> data/masks/
   calibrate     calibrate.py            GeoCalib focal, distortion and per-frame gravity -> data/calibration/
                                         (--calibration mapillary: Mapillary's -> data/calibration_mapillary/)
-  reconstruct   reconstruct.py          ALIKED + nearest-neighbour or LightGlue matching, COLMAP global
-                                        mapper with gravity priors, per leg -> data/reconstruction/
-  align         align.py                building points fitted to the OSM footprints; aligned cameras
-                                        -> data/alignment/, figures -> results/
+  reconstruct   reconstruct.py          COLMAP SIFT (or ALIKED + nearest-neighbour / LightGlue) matching,
+                                        COLMAP global mapper with gravity priors, per leg; a focal that
+                                        shrank >5% below GeoCalib's solved again held -> data/reconstruction/
+  align         align.py                building points fitted to the OSM footprints: scale held at the
+                                        GPS placement, walls matched by direction, heading from the
+                                        facades where they are clear; aligned cameras -> data/alignment/,
+                                        figures -> results/
 Each ROI has its own folder, outputs/alignment/mapillary_roi_N/, holding data/ (the folders above) and
 results/ (overview.png, fit_<leg>_<sequence>.png).
 
@@ -330,10 +333,16 @@ def main():
         help="Drop weakly anchored frames and fit each side of the gap separately (off by default)",
     )
     g.add_argument(
-        "--matcher",
-        choices=["auto", "nn", "lightglue"],
-        default="auto",
-        help="auto: nearest-neighbour for frames under 6 m apart, LightGlue otherwise",
+        "--hold-focal-drop",
+        type=float,
+        default=0.05,
+        help="Solve again with GeoCalib's focal held a camera whose refined focal came out more than this "
+        "fraction below it (default 0.05)",
+    )
+    g.add_argument(
+        "--no-focal-rule",
+        action="store_true",
+        help="Keep every refined focal (no --hold-focal-drop)",
     )
     g = parser.add_argument_group("align stage")
     g.add_argument(
@@ -346,6 +355,28 @@ def main():
         "--no-link",
         action="store_true",
         help="Fit each leg on its own instead of tying linked legs together",
+    )
+    g.add_argument(
+        "--walls",
+        choices=["hybrid", "oriented", "nearest"],
+        default="hybrid",
+        help="hybrid (default): building points on facade lines matched to walls of their own direction, "
+        "the others to the nearest wall at half weight, within 20 m of the direction-matched fit; "
+        "oriented: the facade-line points only; nearest: every point to the nearest wall (previous)",
+    )
+    g.add_argument(
+        "--heading",
+        choices=["facades", "free"],
+        default="facades",
+        help="facades (default): the heading from the facade directions where they give a clear answer, "
+        "else free; free: searched within +-15 deg (previous)",
+    )
+    g.add_argument(
+        "--gps",
+        choices=["auto", "computed", "measured"],
+        default="auto",
+        help="auto (default): Mapillary's computed positions, per leg the measured GPS where they look "
+        "broken (align.py gps_check); computed; measured",
     )
     args = parser.parse_args()
     if args.one_leg:
@@ -508,8 +539,6 @@ def main():
             args.min_frames,
             "--max-frames",
             args.max_frames,
-            "--matcher",
-            args.matcher,
             "--gap-factor",
             args.gap_factor,
             *(["--solo-cameras"] if args.solo_cameras else []),
@@ -525,19 +554,24 @@ def main():
             *(["--fix-focal"] if args.fix_focal else []),
             *(["--focal", args.focal] if args.focal else []),
             *(["--split-weak"] if args.split_weak else []),
+            *(
+                []
+                if args.no_focal_rule
+                else ["--hold-focal-drop", args.hold_focal_drop]
+            ),
         )
         timings["reconstruct"] = time.time() - t0
         if paths.legs_json.exists():
             names = {
                 "prepare": "prepare frames and masks",
-                "features_matching": "COLMAP import and match check (CPU)",
+                "features_matching": "COLMAP SIFT or feature import, and match check (CPU)",
                 "mapper": "COLMAP mapper",
                 "mapper_fallback": "incremental-mapper fallback",
                 "retriangulation": "re-triangulation",
             }
             ldoc = json.loads(paths.legs_json.read_text())
             parts["reconstruct"] = {
-                "keypoints and matching (GPU, one process)": (
+                "keypoints and matching (ALIKED, one process)": (
                     ldoc.get("seconds") or {}
                 ).get("features_and_matching", 0.0)
             }
@@ -557,6 +591,12 @@ def main():
             args.max_error,
             *tag,
             *(["--no-link"] if args.no_link else []),
+            "--walls",
+            args.walls,
+            "--heading",
+            args.heading,
+            "--gps",
+            args.gps,
         )
         timings["align"] = time.time() - t0
 

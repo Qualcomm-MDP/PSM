@@ -32,7 +32,7 @@ from .geo_common import (
     load_cameras,
     load_points,
 )  # noqa: E402
-from .align import point_pieces  # noqa: E402
+from .align import fold_words, observed_share, point_pieces  # noqa: E402
 from .osm import building_heights  # noqa: E402
 
 COL = {"building": "#d62728", "road": "#8c8c8c", "other": "#4c9be8"}
@@ -71,6 +71,16 @@ def plot_leg(p, folder_dir, buildings):
     names, C, R = load_cameras(model)
     xyz, rgb, track = load_points(model)
     piece_of = {n: k for k, pc in enumerate(pieces) for n in (pc["images"] or names)}
+    # a folded leg (align.py fold_keep): only the kept cameras and the points they mostly see
+    shown = np.ones(len(xyz), bool)
+    C_out, out_piece = np.zeros((0, 3)), 0
+    if any(n not in piece_of for n in names):
+        shown = observed_share(model, set(piece_of)) >= 0.5
+        kept = [i for i, n in enumerate(names) if n in piece_of]
+        left = [i for i, n in enumerate(names) if n not in piece_of]
+        # drawn faintly, placed with the nearest kept piece's similarity
+        C_out, out_piece = C[left], (0 if left[0] < kept[0] else len(pieces) - 1)
+        names, C, R = [names[i] for i in kept], C[kept], R[kept]
     cam_piece = np.array([piece_of[n] for n in names])
     pt_piece = (
         point_pieces(model, names, piece_of)
@@ -81,6 +91,7 @@ def plot_leg(p, folder_dir, buildings):
     bld, _ = label_points(model, p.masks / folder, MASK_BUILDING, 0.5)
     road, _ = label_points(model, p.masks / folder, MASK_ROAD, 0.5)
     label = np.where(bld, "building", np.where(road, "road", "other"))
+    label[~shown] = "hidden"
     view = np.array(
         [(basis @ R[i][:, 2]) for i in range(len(names))]
     )  # camera z axis, levelled
@@ -94,7 +105,7 @@ def plot_leg(p, folder_dir, buildings):
 
     enu = LocalFrame(*tf["enu_origin_lon_lat"])
     # extent: the cameras and most of the building points (setbacks can be 50 m+), plus a margin
-    bxy = P[bld & (P[:, 2] > 0) & (P[:, 2] < 40), :2]
+    bxy = P[bld & shown & (P[:, 2] > 0) & (P[:, 2] < 40), :2]
     ext = (
         np.vstack([Cw[:, :2], np.percentile(bxy, [2, 98], axis=0)])
         if len(bxy)
@@ -129,6 +140,19 @@ def plot_leg(p, folder_dir, buildings):
             alpha=0.8,
             zorder=1,
             label=f"{name} points ({m.sum()})",
+        )
+    if len(C_out):
+        Co = to_enu(C_out, np.full(len(C_out), out_piece))
+        ax.plot(*Co[:, :2].T, "x--", color="#ff7f0e", ms=5, lw=1.0, zorder=3)
+        # legend entry only (the legend scales markers x8 for the point clouds)
+        ax.plot(
+            [],
+            [],
+            "x--",
+            color="#ff7f0e",
+            ms=0.7,
+            lw=1.0,
+            label=f"left out after a fold ({len(C_out)})",
         )
     for k in range(len(pieces)):  # one line per piece; a dotted link shows each cut
         m = cam_piece == k
@@ -219,7 +243,7 @@ def plot_leg(p, folder_dir, buildings):
         fontsize=10,
         loc="left",
     )
-    mapper = "global"
+    mapper, features = "global", "ALIKED"
     if p.legs_json.exists():
         doc = json.loads(p.legs_json.read_text())
         used = [
@@ -230,6 +254,7 @@ def plot_leg(p, folder_dir, buildings):
             if c["folder"] == folder
         ]
         mapper = (used and used[0]) or doc.get("mapper", "global")
+        features = {"sift": "SIFT"}.get(doc.get("features"), "ALIKED")
     pano = p.pano(folder)
     calib = (
         f"360 {pano['side']} crop"
@@ -239,10 +264,21 @@ def plot_leg(p, folder_dir, buildings):
         else "GeoCalib"
     )
     fig.suptitle(
-        f"{p.name} {stats['leg']}/{folder}: {calib} + ALIKED + "
+        f"{p.name} {stats['leg']}/{folder}: {calib} + {features} + "
         f"{'GLOMAP' if mapper == 'global' else 'COLMAP incremental'}, "
         f"scale x{stats['scale_vs_mapillary']:.2f} vs GPS placement, camera height {stats['camera_height_m']:.2f} m, "
-        f"{'reliable' if stats['reliable'] else 'UNRELIABLE'}",
+        f"{'reliable' if stats['reliable'] else 'UNRELIABLE: ' + '; '.join((stats.get('reliability') or {}).get('failed', []))}"
+        + (
+            f"; reconstruction {fold_words(stats['fold_trim'])}: "
+            f"{len(stats['fold_trim']['left_out'])} cameras left out (orange)"
+            + (
+                f", {len(stats['fold_trim']['relocalized'])} of them re-placed by PnP"
+                if stats["fold_trim"].get("relocalized")
+                else ""
+            )
+            if stats.get("fold_trim")
+            else ""
+        ),
         fontsize=11,
         x=0.01,
         ha="left",

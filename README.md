@@ -29,7 +29,7 @@ and, for aligned poses, [COLMAP](https://colmap.github.io/install.html) 4.2 or n
     ```
 
     The first run also downloads model weights (Mask2Former, about 900 MB; LaMa; GeoCalib;
-    ALIKED and LightGlue) into your Hugging Face and PyTorch caches.
+    ALIKED) into your Hugging Face and PyTorch caches.
 
 2. Install COLMAP 4.2+:
 

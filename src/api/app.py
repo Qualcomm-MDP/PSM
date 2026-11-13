@@ -63,6 +63,7 @@ class JobDefaults(BaseModel):
     poses: Literal["raw", "computed", "colmap"] | None = None
     remove_obstructions: bool | None = None
     fill_obstructions: bool | None = None
+    sky_only: bool | None = None
     seg_model: Literal["large", "tiny"] | None = None
     device: Literal["auto", "cpu", "gpu", "cuda"] | None = None
 
@@ -99,9 +100,13 @@ class JobRequest(BaseModel):
     poses: Literal["raw", "computed", "colmap"] = "colmap"
     # With "colmap": texture only from photos the alignment placed (--aligned-only)
     aligned_only: bool = False
+    # With "colmap" the method is fixed (pose_alignment): ALIKED + nearest-neighbour matching, the
+    # scale from the GPS placement, walls matched by direction, the heading from the facades
     remove_obstructions: bool = True
     # False: segment the obstructions but do not paint them over (the CLI's --no-fill)
     fill_obstructions: bool = True
+    # With remove_obstructions: mask only the sky, never painted over (the CLI's --sky-only)
+    sky_only: bool = False
     seg_model: Literal["large", "tiny"] = "large"
     # auto and gpu: the best GPU here (NVIDIA, else Apple), else the CPU; cuda: NVIDIA only
     device: Literal["auto", "cpu", "gpu", "cuda"] = "auto"
@@ -289,8 +294,11 @@ def create_app(
             options={
                 "poses": req.poses,
                 "aligned_only": req.aligned_only,
+                # the fixed method (pose_alignment), recorded for the job's details
+                "alignment_method": "aliked_nn",
                 "remove_obstructions": req.remove_obstructions,
                 "fill_obstructions": req.fill_obstructions,
+                "sky_only": req.sky_only,
                 "seg_model": req.seg_model,
                 "device": req.device,
                 "terrain": req.terrain or req.naip,
@@ -302,6 +310,22 @@ def create_app(
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str) -> dict[str, Any]:
         return _job_or_404(job_id).to_dict()
+
+    @app.get("/api/jobs/{job_id}/storage")
+    def job_storage(job_id: str) -> dict[str, Any]:
+        """What deleting this job would remove from this computer, and how big it is."""
+        _job_or_404(job_id)
+        return jobs.storage(job_id)
+
+    @app.delete("/api/jobs/{job_id}")
+    def delete_job(job_id: str) -> dict[str, Any]:
+        """Delete a finished job: its model, previews and log, and its alignment folder
+        (downloaded photos, masks, reconstructions) unless another job uses it."""
+        _job_or_404(job_id)
+        try:
+            return jobs.delete(job_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.get("/api/jobs/{job_id}/model.glb")
     def get_model(job_id: str, download: bool = False) -> FileResponse:
@@ -372,6 +396,15 @@ def create_app(
         return FileResponse(path, media_type="image/jpeg")
 
     if serve_web and WEB_DIR.is_dir():
+        # The page's files change with the code: browsers must check for a newer copy on every
+        # load (a cached app.js left a new page's Delete button with nothing behind it)
+        @app.middleware("http")
+        async def revalidate_web_files(request, call_next):
+            response = await call_next(request)
+            if not request.url.path.startswith("/api/"):
+                response.headers["Cache-Control"] = "no-cache"
+            return response
+
         app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
 
     return app

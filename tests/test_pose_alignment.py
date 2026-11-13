@@ -240,44 +240,218 @@ def test_crop_view_looks_where_its_yaw_says():
     assert abs(centre(-90.0) - 50) <= 1  # -90 deg: column 200, one quarter across
 
 
-def _rig_entry(fit, points=1500, reliable=None, backward=()):
-    return (
-        {
-            "aligned": True,
-            "reliable": fit <= 2.0 if reliable is None else reliable,
-            "points_to_footprint_median_m": {"aligned": fit},
-            "building_points": points,
-            "cameras_out_of_order": list(backward),
-            "cameras_inside_buildings": 0,
-            "registered": 40,
-        },
-        [{"file": "frame_0001.jpg", "reliable": fit <= 2.0}],
+def _street(cross_every=(25.0, 40.0, 30.0, 45.0, 35.0)):
+    """Walls of a straight street running north (x = -10 and x = +10, y 0..200) broken by cross
+    streets at irregular spacing (cross walls at each gap); points on the walls every 0.5 m."""
+    import numpy as np
+
+    A, B, P = [], [], []
+    y = 0.0
+    for gap in cross_every:
+        for x in (-10.0, 10.0):
+            A.append([x, y]), B.append([x, y + gap - 8])
+            P += [[x, v] for v in np.arange(y, y + gap - 8, 0.5)]
+            side = -1 if x < 0 else 1
+            A.append([x, y + gap - 8]), B.append([x + side * 15, y + gap - 8])
+            P += [[x + side * u, y + gap - 8] for u in np.arange(0, 15, 0.5)]
+        y += gap
+    cams = np.c_[np.zeros(40), np.linspace(5, y - 5, 40)]
+    return np.array(A, float), np.array(B, float), np.array(P, float), cams
+
+
+def _checks(P, A, B, cams):
+
+    from pose_alignment.align import OrientedWalls, facade_dirs, placement_checks
+    from pose_alignment.osm import WallMap
+
+    lo, hi = cams.min(0) - 120, cams.max(0) + 120
+    return placement_checks(
+        P,
+        facade_dirs(P, 2.0),
+        cams,
+        A,
+        B,
+        WallMap(A, B, [], lo, hi),
+        OrientedWalls(A, B, lo, hi),
     )
 
 
-def test_a_rig_is_reliable_when_its_best_camera_fits():
-    from pose_alignment.align import rig_reliability
+def test_a_placed_leg_on_its_walls_is_reliable():
+    from pose_alignment.align import verdict
 
-    leg = {
-        "id": "leg04",
-        "cameras": [
-            {"folder": "right", "rig": "right"},
-            {"folder": "left", "rig": "right"},
-        ],
-    }
-    out = {"right": _rig_entry(3.0), "left": _rig_entry(1.9)}
-    rig_reliability(leg, out, 2.0)
-    assert out["right"][0]["reliable"] and out["right"][1][0]["reliable"]
-    assert "reliable_via_rig" in out["right"][0]
+    A, B, P, cams = _street()
+    chk = _checks(P, A, B, cams)
+    assert chk["near_median_m"] < 0.3 and chk["near_explained_share"] > 0.9
+    assert abs(chk["along_best_shift_m"]) <= 1 and chk["along_margin"] > 0.1
+    assert verdict(chk, 0.0, [], 2.0) == []
 
-    # both sides far off: the shared pose is wrong
-    out = {"right": _rig_entry(4.5), "left": _rig_entry(1.9)}
-    rig_reliability(leg, out, 2.0)
-    assert not out["right"][0]["reliable"]
-    # a folded reconstruction stays unreliable however well it fits
-    out = {
-        "right": _rig_entry(3.0, backward=["frame_0002.jpg"]),
-        "left": _rig_entry(1.9),
+
+def test_long_uniform_frontages_are_ambiguous_along_the_street():
+    import numpy as np
+
+    from pose_alignment.align import verdict
+
+    # only the two long frontages, no cross walls: nothing holds the leg along the street
+    A = np.array([[-10.0, 0.0], [10.0, 0.0]])
+    B = np.array([[-10.0, 200.0], [10.0, 200.0]])
+    P = np.array([[x, v] for x in (-10.0, 10.0) for v in np.arange(20, 180, 0.5)])
+    cams = np.c_[np.zeros(40), np.linspace(5, 195, 40)]
+    fails = verdict(_checks(P, A, B, cams), 0.0, [], 2.0)
+    assert any("ambiguous along the street" in f for f in fails)
+
+
+def test_verdict_names_each_failed_check():
+    from pose_alignment.align import verdict
+
+    chk = {
+        "near_points": 10,
+        "near_explained_share": 0.3,
+        "near_median_m": 2.5,
+        "along_best_shift_m": 12.0,
+        "along_margin": 0.5,
+        "along_second_shift_m": -20.0,
     }
-    rig_reliability(leg, out, 2.0)
-    assert not out["right"][0]["reliable"]
+    fails = verdict(chk, 0.3, ["frame_0002.jpg"], 2.0)
+    assert len(fails) == 6  # points, unexplained, fit, better placement, inside, order
+
+
+def test_facade_heading_finds_the_turn_between_model_and_map():
+    import math
+
+    from pose_alignment.align import facade_dirs, facade_heading, rotate_dirs
+
+    A, B, P, cams = _street()
+    # the model is the map turned by -2 deg: its facade directions must be turned +2 deg back
+    D = rotate_dirs(facade_dirs(P, 2.0), math.radians(-2.0))
+    ang, info = facade_heading(D, cams, 0.0, A, B)
+    assert ang is not None and abs(math.degrees(ang) - 2.0) < 0.3, info
+
+
+def test_geocalib_looks_unreliable_for_a_rig_with_scattered_focals():
+    from pose_alignment.geo_common import calibration_unreliable
+
+    class _Roi:
+        def frames(self, folder):
+            make = "Apple" if folder == "phone" else "Suzuki"
+            return {"frame_0001.jpg": {"make": make, "model": "DL1000"}}
+
+    def doc(f, not_converged=0):
+        return {
+            "focal_norm": f,
+            "width": 1920,
+            "height": 1080,
+            "sample_frames": list(range(10)),
+            "sample_not_converged": not_converged,
+        }
+
+    docs = {"rig_a": doc(0.57), "rig_b": doc(0.78), "phone": doc(0.80, not_converged=7)}
+    reasons = calibration_unreliable(_Roi(), docs)
+    assert set(reasons) == {"rig_a", "rig_b", "phone"}
+    assert "rig cameras got focals 0.57-0.78" in reasons["rig_a"][0]
+    assert "no convergence on 7/10" in reasons["phone"][0]
+    assert (
+        calibration_unreliable(_Roi(), {"rig_a": doc(0.60), "rig_b": doc(0.62)}) == {}
+    )
+
+
+def test_fold_keep_keeps_the_longest_stretch():
+    """A camera behind the one before cuts the leg; the longest stretch is kept if long enough."""
+    from pose_alignment.align import backward_steps, fold_keep
+
+    y = np.r_[
+        np.arange(21.0), [19.0], np.arange(20.0, 28.0)
+    ]  # frame 22 placed behind 21
+    Lc = np.c_[np.zeros(len(y)), y, np.zeros(len(y))]
+    assert backward_steps(Lc).tolist() == [21]
+    assert fold_keep(Lc) == (0, 21)
+    assert fold_keep(Lc[:12]) is None  # its first 12 cameras hold no fold
+    straight = np.c_[np.zeros(10), np.arange(10.0), np.zeros(10)]
+    assert fold_keep(straight) is None
+
+
+def test_gps_check_flags_broken_computed_tracks():
+    """Measured GPS where the computed track's length is off, or rig cameras disagree."""
+    from pose_alignment.align import gps_check
+
+    def frames(n, step_c, step_m, t0=0):
+        return {
+            f"frame_{i:04d}.jpg": {
+                "lon": -83.74 + i * step_c / 82000,
+                "lat": 42.28,
+                "gps": [-83.74 + i * step_m / 82000, 42.28],
+                "captured_at_ms": t0 + i * 1000,
+            }
+            for i in range(n)
+        }
+
+    class _P:
+        def __init__(self, data):
+            self.data = data
+
+        def frames(self, folder):
+            return self.data[folder]
+
+    good = {"a": frames(20, 5.0, 5.1)}
+    leg = {"cameras": [{"folder": "a", "frame_files": list(good["a"])}]}
+    assert gps_check(_P(good), leg) == ("computed", [])
+    short = {"a": frames(20, 5.0, 7.0)}  # measured 40% longer
+    src, why = gps_check(_P(short), leg)
+    assert src == "measured" and "measured GPS" in why[0]
+    rig = {
+        "a": frames(20, 5.0, 5.0),
+        "b": frames(20, 3.5, 3.5),
+    }  # same time, 30% shorter
+    leg2 = {"cameras": [{"folder": f, "frame_files": list(rig[f])} for f in "ab"]}
+    src, why = gps_check(_P(rig), leg2)
+    assert src == "measured" and "rig cameras" in why[0]
+
+
+def test_alignment_args_fixed_method():
+    """The method is fixed (run_pipeline.py's defaults); options from older jobs are ignored."""
+    from pose_alignment.align_poses import alignment_args
+
+    assert alignment_args({}) == []
+    assert alignment_args(None) == []
+    assert (
+        alignment_args(
+            {"features": "sift", "alignment": "previous", "focal_rule": False}
+        )
+        == []
+    )
+
+
+def test_steps_against_track_tells_u_turns_from_folds():
+    """A capture that turns back is no fold; a stretch slid back while the capture moved on is."""
+    from pose_alignment.geo_common import plan_onto, steps_against_track
+
+    out_and_back = np.r_[
+        np.c_[np.arange(10.0), np.zeros(10)], np.c_[np.arange(9.0, -1, -1), np.ones(10)]
+    ]
+    gps = out_and_back * 3.0  # the same walk in metres
+    model = np.c_[out_and_back, np.zeros(len(out_and_back))]  # 3D, another scale
+    assert steps_against_track(plan_onto(model, gps), gps) == []
+
+    straight = np.c_[np.arange(20.0) * 3, np.zeros(20)]
+    folded = straight.copy()
+    folded[12:, 0] -= 10.0  # frames 12.. slid back while the capture kept going
+    assert steps_against_track(plan_onto(folded, straight), straight) == [12]
+
+
+def test_jump_steps_and_fold_keep_cut_a_sideways_jump():
+    """A camera placed far to the side while the capture moved on a little is cut off like a fold;
+    a steady walk, and a faster stretch the GPS also shows, are not."""
+    from pose_alignment.align import fold_keep, jump_steps
+
+    gps = np.c_[np.arange(20.0) * 1.5, np.zeros(20)]  # 1.5 m steps
+    model = np.c_[gps / 3.0, np.zeros(20)]  # the same walk at another scale
+    assert jump_steps(model, gps).tolist() == []
+    assert fold_keep(model, gps) is None
+
+    jumped = model.copy()
+    jumped[:3, 1] += 4.0  # the first three cameras 12 m to the side
+    assert jump_steps(jumped, gps).tolist() == [3]
+    assert fold_keep(jumped, gps) == (3, 20)
+
+    fast = gps.copy()
+    fast[10:, 0] += np.arange(10) * 4.5  # the walker ran: 6 m steps, in the GPS too
+    assert jump_steps(np.c_[fast / 3.0, np.zeros(20)], fast).tolist() == []

@@ -491,3 +491,86 @@ def test_terrain_and_naip_options(tmp_path, request_options, options, use, stage
     log = client.get(f"/api/jobs/{job['id']}/log").text
     # A skipped stage doesn't get a section in the log either.
     assert ("── Terrain ──" in log) == options["terrain"]
+
+
+def _aligned_pipeline(roi):
+    """A fake pipeline whose alignment used the ROI folder roi (as align_poses records it)."""
+
+    def align(value, state):
+        state.set_metadata("pose_alignment", {"roi_folder": str(roi), "added": 2})
+        return value
+
+    def factory():
+        pipeline = PipelineChain("aligned")
+        pipeline.add_stage("fetch", fetch, label="Fetch data")
+        pipeline.add_stage("align_poses", align, label="Align poses")
+        pipeline.add_stage("export", export, label="Export")
+        return pipeline
+
+    return factory
+
+
+def test_deleting_a_job_removes_its_files_and_alignment_folder(tmp_path, monkeypatch):
+    from pose_alignment import geo_common
+
+    rois = tmp_path / "alignment"
+    roi = rois / "mapillary_roi_1"
+    (roi / "data" / "mapillary").mkdir(parents=True)
+    (roi / "data" / "mapillary" / "frame_0001.jpg").write_bytes(b"x" * 5000)
+    monkeypatch.setattr(geo_common, "ROIS_DIR", rois)
+    client = make_client(tmp_path / "jobs", _aligned_pipeline(roi))
+
+    job = wait_for(client, client.post("/api/jobs", json={"bbox": BBOX}).json()["id"])
+    assert job["result"]["alignment_folder"] == str(roi)
+    storage = client.get(f"/api/jobs/{job['id']}/storage").json()
+    assert (
+        storage["alignment_folder"] == str(roi) and storage["alignment_bytes"] == 5000
+    )
+    assert storage["alignment_kept"] is None and storage["job_bytes"] > 0
+
+    deleted = client.delete(f"/api/jobs/{job['id']}")
+    assert deleted.status_code == 200 and deleted.json()["not_removed"] == []
+    assert not roi.exists() and not (tmp_path / "jobs" / job["id"]).exists()
+    assert client.get(f"/api/jobs/{job['id']}").status_code == 404
+    # gone from the list of runs, now and after the app restarts
+    assert job["id"] not in [j["id"] for j in client.get("/api/jobs").json()["jobs"]]
+    restarted = make_client(tmp_path / "jobs", _aligned_pipeline(roi))
+    assert job["id"] not in [j["id"] for j in restarted.get("/api/jobs").json()["jobs"]]
+
+
+def test_an_alignment_folder_another_job_uses_is_kept(tmp_path, monkeypatch):
+    from pose_alignment import geo_common
+
+    rois = tmp_path / "alignment"
+    roi = rois / "mapillary_roi_2"
+    roi.mkdir(parents=True)
+    monkeypatch.setattr(geo_common, "ROIS_DIR", rois)
+    client = make_client(tmp_path / "jobs", _aligned_pipeline(roi))
+
+    first = wait_for(client, client.post("/api/jobs", json={"bbox": BBOX}).json()["id"])
+    second = wait_for(
+        client, client.post("/api/jobs", json={"bbox": BBOX}).json()["id"]
+    )
+    storage = client.get(f"/api/jobs/{first['id']}/storage").json()
+    assert second["id"] in storage["alignment_kept"]
+    client.delete(f"/api/jobs/{first['id']}")
+    assert roi.exists()  # still the second job's
+    client.delete(f"/api/jobs/{second['id']}")
+    assert not roi.exists()
+
+
+def test_a_folder_outside_the_alignment_outputs_is_never_deleted(tmp_path, monkeypatch):
+    from pose_alignment import geo_common
+
+    monkeypatch.setattr(geo_common, "ROIS_DIR", tmp_path / "alignment")
+    elsewhere = tmp_path / "my_photos" / "mapillary_roi_9"
+    elsewhere.mkdir(parents=True)
+    client = make_client(tmp_path / "jobs", _aligned_pipeline(elsewhere))
+
+    job = wait_for(client, client.post("/api/jobs", json={"bbox": BBOX}).json()["id"])
+    assert (
+        "not an alignment folder"
+        in client.get(f"/api/jobs/{job['id']}/storage").json()["alignment_kept"]
+    )
+    client.delete(f"/api/jobs/{job['id']}")
+    assert elsewhere.exists()

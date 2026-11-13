@@ -85,6 +85,12 @@ def main():
         "by view angle, distance and obstructions; best: each face from its single best photo",
     )
     parser.add_argument(
+        "--sky-only",
+        action="store_true",
+        help="Mask only the sky in the facade photos (never painted over), leaving cars, poles "
+        "and people as taken: no sky projected onto walls",
+    )
+    parser.add_argument(
         "--no-fill",
         action="store_true",
         default=False,
@@ -175,6 +181,7 @@ def main():
             "progress_monitor": pipeline_progress,
             "remove_obstructions": not args.no_seg,
             "fill_obstructions": not args.no_fill,
+            "sky_only": args.sky_only,
             "texture_mode": args.texture,
             "output_path": args.output,
             "ask_output_path": ask_save_path,
@@ -185,6 +192,7 @@ def main():
             "pose_source": args.poses,
             "aligned_only": args.aligned_only,
             "alignment_dir": args.alignment_dir,
+            "alignment_options": {},
         },
         profiler=profiler,
     )

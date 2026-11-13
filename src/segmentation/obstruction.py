@@ -53,6 +53,11 @@ OBSTRUCTION_NAMES = {
     "ground animal",
 }
 
+# Sky only (the web app's "Sky only", the CLI's --sky-only): the sky masked in the facade photos
+# so it is never projected onto a wall (an OSM building drawn taller than the real one, a roof
+# line); everything else is left as taken. Vistas and Cityscapes both name the class "Sky".
+SKY_NAMES = {"sky"}
+
 LAMA_MAX_DIM = 1024
 
 _lama: SimpleLama | None = None
@@ -89,9 +94,12 @@ def _load_lama(
     return _lama
 
 
-def obstruction_mask(labels: np.ndarray, names: dict[int, str]) -> np.ndarray:
-    """255 where the class map (with its class names) shows an obstruction, grown by 7 px."""
-    mask = class_lut(names, OBSTRUCTION_NAMES, value=255)[labels]
+def obstruction_mask(
+    labels: np.ndarray, names: dict[int, str], classes=OBSTRUCTION_NAMES
+) -> np.ndarray:
+    """255 where the class map (with its class names) shows one of `classes` (default: the
+    obstructions; SKY_NAMES for sky only), grown by 7 px."""
+    mask = class_lut(names, classes, value=255)[labels]
     return cv2.dilate(mask, np.ones((15, 15), np.uint8))
 
 
@@ -101,14 +109,16 @@ def build_obstruction_mask(
     device: str | None = None,
     reporter: Reporter | None = None,
     labels: tuple[np.ndarray, dict[int, str]] | None = None,
+    classes=OBSTRUCTION_NAMES,
 ) -> np.ndarray:
     """labels: the image's class map and class names when it was segmented already
-    (segmentation.model.LabelCache); otherwise the model runs on the image."""
+    (segmentation.model.LabelCache); otherwise the model runs on the image. classes: what to
+    mask (obstruction_mask)."""
     if labels is None:
         seg = segment([img_bgr], model_id, device, reporter)[0]
         _, model = load_model(model_id, device, reporter)
         labels = (seg, id2label(model))
-    return obstruction_mask(*labels)
+    return obstruction_mask(*labels, classes=classes)
 
 
 def synthesize_texture(

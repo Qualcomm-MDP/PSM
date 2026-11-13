@@ -26,7 +26,8 @@ from trimesh.visual.material import PBRMaterial
 
 from common import PipelineState
 from common.MeshUtils import _get_utm_transformer
-from common.reporter import Reporter, get_reporter
+from common.http_retry import get_with_retries
+from common.reporter import get_reporter, notify, Reporter
 
 NAIP_URL = (
     "https://imagery.nationalmap.gov/arcgis/rest/services/"
@@ -126,8 +127,7 @@ def fetch_naip(
                 bbox=f"{x0},{y1 - h * res},{x0 + w * res},{y1}",
                 size=f"{w},{h}",
             )
-            r = session.get(NAIP_URL, params=params, timeout=180)
-            r.raise_for_status()
+            r = get_with_retries(session, NAIP_URL, params=params, timeout=180)
             if not r.headers.get("Content-Type", "").startswith("image"):
                 raise RuntimeError(f"NAIP service returned non-image: {r.text[:200]}")
             tile = Image.open(io.BytesIO(r.content)).convert("RGB")
@@ -291,8 +291,10 @@ def naip_stage(value, state: PipelineState):
     reporter = get_reporter(state)
     terrain = state.get_metadata("terrain", None)
     if terrain is None:
-        reporter.warning(
-            "NAIP needs the terrain grid; continuing without aerial photos"
+        notify(
+            state,
+            "No aerial photo: it needs the terrain, which is missing; the ground and roofs have "
+            "no aerial texture",
         )
         return value
     bbox = state.require_metadata("bbox")
@@ -303,5 +305,15 @@ def naip_stage(value, state: PipelineState):
         ortho = build_ortho(value, terrain, to_utm.target_crs.to_epsg(), reporter)
         state.set_metadata("naip", ortho)
     except Exception as exc:  # noqa: BLE001 - plain ground and grey roofs still work
-        reporter.warning(f"NAIP failed ({exc}); continuing without aerial photos")
+        notify(
+            state,
+            f"No aerial photo for this area: NAIP failed ({_short_error(exc)}); the ground and "
+            "roofs have no aerial texture",
+        )
     return value
+
+
+def _short_error(exc: Exception) -> str:
+    """The error without a long request URL (the web app shows it to the user)."""
+    text = str(exc)
+    return text.split(" for url: ")[0] if " for url: " in text else text[:200]

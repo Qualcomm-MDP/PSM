@@ -52,14 +52,13 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .geo_common import RoiPaths, mapillary_calibration
+from .geo_common import RoiPaths, calibration_unreliable, mapillary_calibration
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 import geocalib.lm_optimizer as _lmo  # noqa: E402
 from geocalib import GeoCalib  # noqa: E402
 from geocalib.gravity import Gravity  # noqa: E402
 
-RIG_SPREAD = 0.15  # rig cameras' GeoCalib focals further apart than this: unreliable
 UNRELIABLE = (
     "GeoCalib calibration looks unreliable for this camera; try --calibration mapillary"
 )
@@ -352,35 +351,9 @@ def calibrate_roi(
 
 
 def warn_unreliable(p, docs):
-    """Print UNRELIABLE for each sequence whose GeoCalib optimiser did not converge on most sampled
-    frames, or whose rig siblings (same make, model and image size) got focals more than
-    RIG_SPREAD apart."""
-    reasons = {}
-    for folder, d in docs.items():
-        n = len(d.get("sample_frames", []))
-        if (
-            d.get("source", "geocalib") == "geocalib"
-            and n
-            and d.get("sample_not_converged", 0) > n / 2
-        ):
-            reasons.setdefault(folder, []).append(
-                f"no convergence on {d['sample_not_converged']}/{n} sampled frames"
-            )
-    rigs = {}
-    for folder, d in docs.items():
-        f0 = next(iter(p.frames(folder).values()))
-        rigs.setdefault(
-            (f0.get("make"), f0.get("model"), d["width"], d["height"]), []
-        ).append(folder)
-    for (make, model, *_), folders in rigs.items():
-        focals = [docs[f]["focal_norm"] for f in folders]
-        if len(folders) > 1 and max(focals) / min(focals) - 1 > RIG_SPREAD:
-            for f in folders:
-                reasons.setdefault(f, []).append(
-                    f"{len(folders)} {make} {model} rig cameras got focals "
-                    f"{min(focals):.2f}-{max(focals):.2f}"
-                )
-    for folder, why in reasons.items():
+    """Print UNRELIABLE for each sequence whose GeoCalib calibration looks unreliable
+    (geo_common.calibration_unreliable)."""
+    for folder, why in calibration_unreliable(p, docs).items():
         print(f"{folder}: WARNING: {UNRELIABLE} ({'; '.join(why)})")
 
 

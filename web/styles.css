@@ -19,6 +19,7 @@
   --invert-fg: #ffffff;
   --ok: #1d7a4b;
   --bad: #b42318;
+  --warn: #a15c07;
   --scrim: rgb(12 12 13 / 0.45);
   --map-ground: #efefed;
   --stage: #f5f5f4;
@@ -36,7 +37,7 @@
     --fg: #f4f4f5; --muted: #9b9ba1;
     --accent: #f4f4f5; --accent-hover: #d4d4d8; --accent-fg: #09090a; --accent-soft: #131315;
     --invert-bg: #f4f4f5; --invert-fg: #09090a;
-    --ok: #4ade80; --bad: #f87171; --scrim: rgb(0 0 0 / 0.65);
+    --ok: #4ade80; --bad: #f87171; --warn: #fbbf24; --scrim: rgb(0 0 0 / 0.65);
     --map-ground: #161618; --stage: #111113;
     --tile-filter: brightness(.8) contrast(1.05);
     color-scheme: dark;
@@ -47,7 +48,7 @@
   --fg: #f4f4f5; --muted: #9b9ba1;
   --accent: #f4f4f5; --accent-hover: #d4d4d8; --accent-fg: #09090a; --accent-soft: #131315;
   --invert-bg: #f4f4f5; --invert-fg: #09090a;
-  --ok: #4ade80; --bad: #f87171; --scrim: rgb(0 0 0 / 0.65);
+  --ok: #4ade80; --bad: #f87171; --warn: #fbbf24; --scrim: rgb(0 0 0 / 0.65);
   --map-ground: #161618; --stage: #111113;
   --tile-filter: brightness(.8) contrast(1.05);
   color-scheme: dark;
@@ -237,6 +238,12 @@ a.btn[aria-disabled="true"] { opacity: .45; pointer-events: none; }
 .segmented button[disabled] { opacity: .4; cursor: not-allowed; }
 .btn svg { width: 16px; height: 16px; flex: none; }
 .btn.icon { padding: 9px; }
+.btn.danger { color: var(--bad); }
+.btn.danger:disabled { opacity: 0.45; cursor: not-allowed; }
+.delete-panel { border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent); border-radius: var(--r-sm); padding: 12px 14px; margin-bottom: 14px; display: grid; gap: 8px; }
+.delete-panel ul { margin: 0; padding-left: 18px; }
+.delete-panel .bad { color: var(--bad); }
+.delete-actions { display: flex; gap: 8px; }
 
 /* Stage */
 .stage { position: relative; isolation: isolate; border-radius: var(--r-md); overflow: hidden; background: var(--stage); aspect-ratio: 16 / 10; }
@@ -427,6 +434,9 @@ section.block { padding-block: 40px 0; display: flex; flex-direction: column; ga
 .chip.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, transparent); }
 .chip.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 35%, transparent); }
 .chip.run { color: var(--fg); }
+.chip.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 35%, transparent); }
+dd .warn { color: var(--warn); }
+dd .warn + .warn { margin-top: 4px; }
 
 /* Jobs */
 .jobs { border: 1px solid var(--line); border-radius: var(--r-lg); overflow-x: auto; }
