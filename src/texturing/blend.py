@@ -192,7 +192,7 @@ def bake_walls(
                 confidence_map[int(fi)] = np.zeros((H, W), np.float32)
             acc[int(fi)] += col * w[..., None]
             wsum[int(fi)] += w
-            confidence = confidence_score(rn, cos, clear, average=False)
+            confidence = clip_confidence_score(w, sharpen=SHARPEN)
 
             # Keep the highest confidence observation for each texel
             confidence_map[int(fi)] = np.maximum(

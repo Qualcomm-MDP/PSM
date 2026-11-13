@@ -583,7 +583,6 @@ def _apply_textures(
     atlas_h = photo_h + GRAY_H
     atlas = np.full((atlas_h, ATLAS_W, 4), UNTEXTURED_GREY, dtype=np.uint8)
     for p in patch_records:
-        print(f"This patch has shape {p['patch'].shape}, with an average conf score of {np.mean(p['patch'][:,:,3])}")
         atlas[p["ay"] : p["ay"] + p["ph"], p["ax"] : p["ax"] + p["pw"]] = p["patch"]
 
     DEFAULT_U = 0.5
