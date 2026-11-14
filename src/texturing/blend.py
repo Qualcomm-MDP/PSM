@@ -186,7 +186,7 @@ def bake_walls(
                 )
                 clear = 1.0 - mask[mv, mu] / 255.0
             # median_dist = np.median(rn)
-            # w = 1 - (0.35 * clear) - (0.25 * cos) - (0.40 * (1 - np.exp(-rn / median_dist)))            
+            # w = 1 - (0.35 * clear) - (0.25 * cos) - (0.40 * (1 - np.exp(-rn / median_dist)))
             w = ((cos * clear / (1.0 + rn / 15.0)) ** SHARPEN * ok).astype(np.float32)
             if not w.any():
                 continue
@@ -215,11 +215,7 @@ def bake_walls(
             confidence = clip_confidence_score(w, sharpen=SHARPEN)
 
             # Keep the highest confidence observation for each texel
-            confidence_map[int(fi)] = np.maximum(
-                confidence_map[int(fi)],
-                confidence
-            )
-
+            confidence_map[int(fi)] = np.maximum(confidence_map[int(fi)], confidence)
 
     patches, seen, total = [], 0, 0
     for fi, a in acc.items():

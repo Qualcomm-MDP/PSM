@@ -144,6 +144,7 @@ def ingest_data(bbox: BoundingBox, state: PipelineState):
     else:
         osm_data = osm_client.fetch(bbox, [OSM_MAP_FEATURES.BUILDING])
     from data_ingest.mapillary_sequences import ALIGNMENT_FIELDS, selection_images
+
     min_quality = state.get_metadata("min_quality", None)
     cumulative_data = {"osm": osm_data}
     if aligning:

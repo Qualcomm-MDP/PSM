@@ -210,7 +210,8 @@ def _textured_mesh(out):
     return next(
         g
         for g in out.geometry.values()
-        if getattr(getattr(g.visual, "material", None), "baseColorTexture", None) is not None
+        if getattr(getattr(g.visual, "material", None), "baseColorTexture", None)
+        is not None
     )
 
 
@@ -321,7 +322,7 @@ def test_removing_obstructions_also_masks_the_sky(monkeypatch):
         def fake_mask(img, *args, classes=None, **kwargs):
             asked.append(classes)
             m = np.zeros(img.shape[:2], np.uint8)
-            m[:10 if classes == SKY_NAMES else 20] = 255  # the sky: the top rows
+            m[: 10 if classes == SKY_NAMES else 20] = 255  # the sky: the top rows
             return m
 
         monkeypatch.setattr(tex_projection, "photo_labels", labels)

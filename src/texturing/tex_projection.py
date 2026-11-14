@@ -19,7 +19,12 @@ from common.reporter import Reporter, get_reporter
 from naip.naip import roof_faces, roof_patches
 from data_ingest.pano import PANO_TYPES, crop_view
 from texturing.blend import bake_walls
-from segmentation import SKY_NAMES, build_obstruction_mask, photo_labels, synthesize_texture
+from segmentation import (
+    SKY_NAMES,
+    build_obstruction_mask,
+    photo_labels,
+    synthesize_texture,
+)
 from segmentation.model import LabelCache, model_id_or_default
 
 CAMERA_HEIGHT_M = 1.6
@@ -664,7 +669,9 @@ def _apply_textures(
             S = np.array([[ds, 0, s_min], [0, -dt, t_max], [0, 0, 1]], dtype=np.float64)
             H_atlas = H @ S
 
-            confidence = confidence_score(depths, 1, score) # in this case the cos and clear are being captured by score, and if we multiple them, we will be multiplying score by 1 so it's ok hopefully for now
+            confidence = confidence_score(
+                depths, 1, score
+            )  # in this case the cos and clear are being captured by score, and if we multiple them, we will be multiplying score by 1 so it's ok hopefully for now
 
             patch_bgr = cv2.warpPerspective(
                 loaded_img,
@@ -674,12 +681,8 @@ def _apply_textures(
                 borderMode=cv2.BORDER_REPLICATE,
             )
 
-            alpha = np.full(
-                (patch_h, patch_w),
-                confidence,
-                dtype=np.uint8
-            )
-            
+            alpha = np.full((patch_h, patch_w), confidence, dtype=np.uint8)
+
             patch_rgb = cv2.cvtColor(patch_bgr, cv2.COLOR_BGR2RGB)
             # photo texels: inside the photo (the border is replicated), not painted over
             ih, iw = int(cd["h"]), int(cd["w"])  # the photo K was made for
@@ -777,28 +780,17 @@ def _apply_textures(
 
     tex_pil = Image.fromarray(atlas)
     # 1. Base mesh: fully opaque
-    base_mesh = trimesh.Trimesh(
-        vertices=new_verts,
-        faces=new_faces,
-        process=False
-    )
+    base_mesh = trimesh.Trimesh(vertices=new_verts, faces=new_faces, process=False)
 
     base_mat = visual.material.PBRMaterial(
-        baseColorFactor=[255, 255, 255, 255],
-        alphaMode="OPAQUE",
-        doubleSided=True
+        baseColorFactor=[255, 255, 255, 255], alphaMode="OPAQUE", doubleSided=True
     )
 
-    base_mesh.visual = visual.TextureVisuals(
-        uv=new_uvs,
-        material=base_mat
-    )
+    base_mesh.visual = visual.TextureVisuals(uv=new_uvs, material=base_mat)
 
     # 2. Overlay mesh: confidence-based transparency
     overlay_mesh = trimesh.Trimesh(
-        vertices=new_verts.copy(),
-        faces=new_faces,
-        process=False
+        vertices=new_verts.copy(), faces=new_faces, process=False
     )
 
     # Move overlay slightly outward
@@ -807,11 +799,7 @@ def _apply_textures(
 
     # Group vertices that occupy the same position
     rounded = np.round(overlay_mesh.vertices, decimals=6)
-    unique_positions, inverse = np.unique(
-        rounded,
-        axis=0,
-        return_inverse=True
-    )
+    unique_positions, inverse = np.unique(rounded, axis=0, return_inverse=True)
 
     # Average normals for vertices at the same position
     averaged_normals = np.zeros((len(unique_positions), 3))
@@ -826,15 +814,11 @@ def _apply_textures(
     overlay_mesh.vertices += averaged_normals[inverse] * offset
 
     overlay_mat = visual.material.PBRMaterial(
-        baseColorTexture=tex_pil,
-        doubleSided=True,
-        alphaMode="BLEND"
+        baseColorTexture=tex_pil, doubleSided=True, alphaMode="BLEND"
     )
 
     overlay_mesh.visual = visual.TextureVisuals(
-        uv=new_uvs,
-        material=overlay_mat,
-        image=tex_pil
+        uv=new_uvs, material=overlay_mat, image=tex_pil
     )
 
     scene.add_geometry(base_mesh)

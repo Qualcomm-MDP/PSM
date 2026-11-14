@@ -936,14 +936,18 @@ def test_delete_photos_removes_only_the_downloaded_photos(tmp_path, monkeypatch)
     monkeypatch.setattr(geo_common, "ROIS_DIR", rois)
     client = make_client(tmp_path / "jobs", _aligned_pipeline(roi))
 
-    created = client.post("/api/jobs", json={"bbox": BBOX, "delete_photos": True}).json()
+    created = client.post(
+        "/api/jobs", json={"bbox": BBOX, "delete_photos": True}
+    ).json()
     assert created["options"]["delete_photos"] is True
     job = wait_for(client, created["id"])
     assert job["status"] == "done"
     assert job["result"]["photos_deleted"] == {"files": 2, "bytes": 10000}
     assert not (seq / "frame_0001.jpg").exists()
     assert not (roi / "data" / "mapillary" / "originals" / "123.jpg").exists()
-    assert (seq / "cameras.json").exists() and (roi / "data" / "masks" / "frame_0001.png").exists()
+    assert (seq / "cameras.json").exists() and (
+        roi / "data" / "masks" / "frame_0001.png"
+    ).exists()
     job_dir = tmp_path / "jobs" / job["id"]
     assert (job_dir / "model.glb").exists() and (job_dir / "images").exists()
     assert "Deleted 2 Mapillary photos" in client.get(f"/api/jobs/{job['id']}/log").text
@@ -965,7 +969,9 @@ def test_photos_are_kept_by_default_and_for_a_shared_folder(tmp_path, monkeypatc
     # the second job asks to delete them, but the first job uses the same folder
     second = wait_for(
         client,
-        client.post("/api/jobs", json={"bbox": BBOX, "delete_photos": True}).json()["id"],
+        client.post("/api/jobs", json={"bbox": BBOX, "delete_photos": True}).json()[
+            "id"
+        ],
     )
     assert second["status"] == "done" and "photos_deleted" not in second["result"]
     assert photo.exists()
@@ -973,5 +979,7 @@ def test_photos_are_kept_by_default_and_for_a_shared_folder(tmp_path, monkeypatc
 
 def test_delete_photos_default_can_be_saved(tmp_path):
     client = make_client(tmp_path)
-    saved = client.put("/api/settings", json={"defaults": {"delete_photos": True}}).json()
+    saved = client.put(
+        "/api/settings", json={"defaults": {"delete_photos": True}}
+    ).json()
     assert saved["defaults"]["delete_photos"] is True

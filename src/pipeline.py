@@ -35,7 +35,9 @@ def export_mesh(value, state):
     transformer = _get_utm_transformer(center_lon, center_lat)
     ox, oy = transformer.transform(center_lon, center_lat)
 
-    if isinstance(value, trimesh.Trimesh):  # one building mesh: named so viewers and the evaluation find it
+    if isinstance(
+        value, trimesh.Trimesh
+    ):  # one building mesh: named so viewers and the evaluation find it
         mesh, value = value, trimesh.Scene()
         value.add_geometry(mesh, node_name="buildings", geom_name="buildings")
 
@@ -77,7 +79,7 @@ def export_mesh(value, state):
             node_name="terrain",
             geom_name="terrain",
         )
-        
+
     # The CLI may pass a callable that asks the user (e.g. a save dialog).
     path = state.get_metadata("output_path", None)
     if path is None:

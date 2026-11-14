@@ -37,9 +37,10 @@ def ground_under(corners, terrain) -> tuple[float, float]:
     ground = terrain.ground(pts[:, 0], pts[:, 1])
     return float(ground.min()), float(ground.max())
 
+
 def run_extrusion(id, buildings, element, area_bbox, terrain):
     corners = get_corners(element, area_bbox)
-    
+
     lines = get_lines(corners)
 
     path = trimesh.path.path.Path2D(
@@ -86,6 +87,7 @@ def run_extrusion(id, buildings, element, area_bbox, terrain):
         buildings[id] = trimesh.util.concatenate([buildings[id], mesh])
     else:
         buildings[id] = mesh
+
 
 def extrude_buildings(
     input_data, area_bbox, reporter: Reporter | None = None, terrain=None

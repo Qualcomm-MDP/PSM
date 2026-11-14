@@ -748,7 +748,10 @@ def verdict(chk, inside_share, backward, max_error):
             f"ambiguous along the street: {chk['along_second_shift_m']:+.1f} m fits almost as well "
             f"({100 * chk['along_margin']:.0f}% worse)"
         )
-        fit_off, alt_off = chk.get("along_fit_vs_gps_m"), chk.get("along_second_vs_gps_m")
+        fit_off, alt_off = (
+            chk.get("along_fit_vs_gps_m"),
+            chk.get("along_second_vs_gps_m"),
+        )
         if fit_off is not None and abs(alt_off) - abs(fit_off) >= REL["gps_tie_m"]:
             # the measured GPS rules the look-alike out
             chk["along_gps_tie_break"] = (
@@ -995,7 +998,13 @@ def relocalize(model_txt, frames, kept):
             continue
         i = inl[:, 0]
         ok, rv, tv = cv2.solvePnP(
-            X[i], xu[i], np.eye(3), None, rv, tv, useExtrinsicGuess=True,
+            X[i],
+            xu[i],
+            np.eye(3),
+            None,
+            rv,
+            tv,
+            useExtrinsicGuess=True,
             flags=cv2.SOLVEPNP_ITERATIVE,
         )
         Rcw = cv2.Rodrigues(rv)[0]
@@ -1387,7 +1396,11 @@ def align_camera(
                 continue
             a = prm[0]
             Rz = np.array(
-                [[math.cos(a), -math.sin(a), 0], [math.sin(a), math.cos(a), 0], [0, 0, 1]]
+                [
+                    [math.cos(a), -math.sin(a), 0],
+                    [math.sin(a), math.cos(a), 0],
+                    [0, 0, 1],
+                ]
             )
             R_enu = Rz @ basis @ Rn
             hdg, pit, rol = heading_pitch_roll(R_enu)
@@ -1409,7 +1422,9 @@ def align_camera(
                     "pano_yaw_deg": meta[nme].get("pano_yaw_deg"),
                     "gps": meta[nme].get("gps"),
                     "mapillary_lonlat": [meta[nme]["lon"], meta[nme]["lat"]],
-                    "offset_to_mapillary_m": float(np.linalg.norm(xy - gps_all[at[nme]])),
+                    "offset_to_mapillary_m": float(
+                        np.linalg.norm(xy - gps_all[at[nme]])
+                    ),
                     "leg_fit_m": after["median_m"],
                     "reliable": bool(reliable),
                     "relocalized": {"inliers": n_in, "off_gps_step_m": round(off, 2)},

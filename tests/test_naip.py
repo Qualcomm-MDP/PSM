@@ -103,7 +103,8 @@ def _textured_mesh(out):
     return next(
         g
         for g in out.geometry.values()
-        if getattr(getattr(g.visual, "material", None), "baseColorTexture", None) is not None
+        if getattr(getattr(g.visual, "material", None), "baseColorTexture", None)
+        is not None
     )
 
 

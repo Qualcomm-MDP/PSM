@@ -193,7 +193,9 @@ class JobManager:
         (None when there was nothing to delete)."""
         folder = result.get("alignment_folder")
         if not folder:
-            log.info("Delete photos: this job downloaded no photos to keep, nothing to delete")
+            log.info(
+                "Delete photos: this job downloaded no photos to keep, nothing to delete"
+            )
             return None
         folder = Path(folder)
         kept = self._alignment_kept(job, folder)
