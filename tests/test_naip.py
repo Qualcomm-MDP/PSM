@@ -96,8 +96,20 @@ def test_ground_has_the_roof_painted_out(mesh):
     assert np.all(ground[roof].min(axis=1) > 200)  # near white, not blue
 
 
+def _textured_mesh(out):
+    """The photo-textured mesh of apply_textures' result (a scene since the confidence overlay)."""
+    if not hasattr(out, "geometry"):
+        return out
+    return next(
+        g
+        for g in out.geometry.values()
+        if getattr(getattr(g.visual, "material", None), "baseColorTexture", None) is not None
+    )
+
+
 def _texel(textured, face):
     """Texture colour at the centre of a face of a textured mesh."""
+    textured = _textured_mesh(textured)
     uv = textured.visual.uv[textured.faces[face]].mean(axis=0)
     img = np.asarray(textured.visual.material.baseColorTexture)
     h, w = img.shape[:2]

@@ -20,6 +20,8 @@ import math
 import cv2
 import numpy as np
 
+from common.per_patch_confidence import clip_confidence_score
+
 TEXEL_M = 0.1  # metres per texel
 MAX_TEXELS = 1024  # longest patch side; larger faces get coarser texels
 REACH_M = 60.0  # a photo paints walls within this distance
@@ -108,6 +110,7 @@ def bake_walls(
     acc: dict[int, np.ndarray] = {}
     wsum: dict[int, np.ndarray] = {}
     wfill: dict[int, np.ndarray] = {}  # weight of painted-over (inpainted) pixels
+    confidence_map: dict[int, np.ndarray] = {}
     lo_ab, hi_ab = np.minimum(A, B), np.maximum(A, B)
 
     for cd in reporter.progress(cam_data, desc="Blending photos onto walls"):
@@ -182,6 +185,8 @@ def bake_walls(
                     (v * mask.shape[0] / img.shape[0]).astype(int), 0, mask.shape[0] - 1
                 )
                 clear = 1.0 - mask[mv, mu] / 255.0
+            # median_dist = np.median(rn)
+            # w = 1 - (0.35 * clear) - (0.25 * cos) - (0.40 * (1 - np.exp(-rn / median_dist)))            
             w = ((cos * clear / (1.0 + rn / 15.0)) ** SHARPEN * ok).astype(np.float32)
             if not w.any():
                 continue
@@ -191,6 +196,7 @@ def bake_walls(
             if int(fi) not in acc:
                 acc[int(fi)] = np.zeros((H, W, 3), np.float32)
                 wsum[int(fi)] = np.zeros((H, W), np.float32)
+                confidence_map[int(fi)] = np.zeros((H, W), np.float32)
                 wfill[int(fi)] = np.zeros((H, W), np.float32)
             acc[int(fi)] += col * w[..., None]
             wsum[int(fi)] += w
@@ -206,6 +212,14 @@ def bake_walls(
                     filled.shape[0] - 1,
                 )
                 wfill[int(fi)] += w * (filled[fv, fu] / 255.0).astype(np.float32)
+            confidence = clip_confidence_score(w, sharpen=SHARPEN)
+
+            # Keep the highest confidence observation for each texel
+            confidence_map[int(fi)] = np.maximum(
+                confidence_map[int(fi)],
+                confidence
+            )
+
 
     patches, seen, total = [], 0, 0
     for fi, a in acc.items():
@@ -216,6 +230,9 @@ def bake_walls(
         # a texel is photo texture when photos saw it and less than half its weight came
         # from pixels obstruction removal painted over
         valid = has & (wfill[fi] < 0.5 * ws)
+        tex = cv2.cvtColor(tex, cv2.COLOR_BGR2RGB)
+        face_confidence = confidence_map[int(fi)].astype(np.uint8)
+        tex_rgba = np.dstack((tex, face_confidence))
         seen += int(has.sum())
         total += has.size
 
@@ -225,7 +242,7 @@ def bake_walls(
         patches.append(
             {
                 "fi": fi,
-                "patch": cv2.cvtColor(tex, cv2.COLOR_BGR2RGB),
+                "patch": tex_rgba,
                 "pw": fr["W"],
                 "ph": fr["H"],
                 **{f"v{j}_px": to_px(fr["vs"][j], fr["vt"][j]) for j in range(3)},

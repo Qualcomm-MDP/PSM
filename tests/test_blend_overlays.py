@@ -191,6 +191,7 @@ def test_texturing_downloads_each_photo_once_in_parallel(monkeypatch):
         mesh, data, bbox, remove_obs=False, reporter=_Quiet(), photo_mask=photo_mask
     )
     # which atlas texels hold photo texture: the atlas's size; the grey strip is not
+    out = _textured_mesh(out)
     atlas = np.asarray(out.visual.material.baseColorTexture)
     assert photo_mask["mask"].shape == atlas.shape[:2]
     assert photo_mask["mask"][-1].max() == 0
@@ -200,6 +201,17 @@ def test_texturing_downloads_each_photo_once_in_parallel(monkeypatch):
         "https://x/photo.jpg",
     ]  # the 360 photo once
     assert out.visual.uv is not None and len(out.faces) == 2
+
+
+def _textured_mesh(out):
+    """The photo-textured mesh of apply_textures' result (a scene since the confidence overlay)."""
+    if not hasattr(out, "geometry"):
+        return out
+    return next(
+        g
+        for g in out.geometry.values()
+        if getattr(getattr(g.visual, "material", None), "baseColorTexture", None) is not None
+    )
 
 
 def test_sky_only_masks_the_sky_instead_of_painting_over(monkeypatch):
