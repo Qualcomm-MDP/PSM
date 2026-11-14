@@ -455,3 +455,33 @@ def test_jump_steps_and_fold_keep_cut_a_sideways_jump():
     fast = gps.copy()
     fast[10:, 0] += np.arange(10) * 4.5  # the walker ran: 6 m steps, in the GPS too
     assert jump_steps(np.c_[fast / 3.0, np.zeros(20)], fast).tolist() == []
+
+
+def test_measured_gps_breaks_an_along_street_tie():
+    """A look-alike within the margin fails the leg unless the measured GPS rules it out: the
+    look-alike lies at least gps_tie_m further from it, along the street, than the fit."""
+    from pose_alignment.align import verdict
+
+    def chk(fit_off=None, second=7.0):
+        c = {
+            "near_points": 300,
+            "near_explained_share": 0.9,
+            "near_median_m": 0.7,
+            "along_best_shift_m": 0.5,
+            "along_second_shift_m": second,
+            "along_margin": 0.08,
+        }
+        if fit_off is not None:
+            c.update(along_fit_vs_gps_m=fit_off, along_second_vs_gps_m=fit_off + second)
+        return c
+
+    ruled_out = chk(fit_off=11.0)  # the look-alike 18 m from the GPS, the fit 11 m
+    assert verdict(ruled_out, 0.0, [], 2.0) == []
+    assert "measured GPS rules it out" in ruled_out["along_gps_tie_break"]
+    # the GPS on the look-alike's side: still ambiguous
+    assert "ambiguous" in verdict(chk(fit_off=-5.0), 0.0, [], 2.0)[0]
+    # no measured GPS: as before
+    assert "ambiguous" in verdict(chk(), 0.0, [], 2.0)[0]
+    # fitting clearly better elsewhere is not a tie
+    far = {**chk(fit_off=11.0), "along_best_shift_m": 40.0}
+    assert "fits better" in verdict(far, 0.0, [], 2.0)[0]

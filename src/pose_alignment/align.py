@@ -659,7 +659,14 @@ REL = {
     "best_within_m": 3.0,
     "margin": 0.10,
     "max_inside": 0.2,
+    "gps_tie_m": 3.0,
 }
+# gps_tie_m: an along-street look-alike (within margin of the best fit) does not make the leg
+# unreliable when the device's measured GPS rules it out: the look-alike's placement lies at least
+# this much further from the measured GPS, along the street, than the fitted one. Alignment_Pipeline's
+# roi_27: fitted on its walls at 0.6-0.7 m, but +7 m along the street scored 8-9% worse (a long
+# frontage: the same valley of the score, not a second place) and failed the leg, which was then
+# textured from Mapillary's poses; the measured GPS puts it 11 m from the fit, the look-alike 18 m
 
 
 def placement_checks(P, D, cams, A, B, wmap, owalls):
@@ -712,6 +719,9 @@ def placement_checks(P, D, cams, A, B, wmap, owalls):
         along_best_shift_m=float(ds[i]),
         along_second_shift_m=float(ds[j]),
         along_margin=float((cost[j] - cost[i]) / max(cost[i], 0.05)),
+        along_dir=[float(v) for v in u],
+        # the scan itself: (shift m, cost) every 0.5 m
+        along_scan=[[float(d), round(float(c), 4)] for d, c in zip(ds, cost)],
     )
     return out
 
@@ -734,10 +744,19 @@ def verdict(chk, inside_share, backward, max_error):
     if abs(chk["along_best_shift_m"]) > REL["best_within_m"]:
         fails.append(f"fits better {chk['along_best_shift_m']:+.1f} m along the street")
     elif chk["along_margin"] < REL["margin"]:
-        fails.append(
+        ambiguous = (
             f"ambiguous along the street: {chk['along_second_shift_m']:+.1f} m fits almost as well "
             f"({100 * chk['along_margin']:.0f}% worse)"
         )
+        fit_off, alt_off = chk.get("along_fit_vs_gps_m"), chk.get("along_second_vs_gps_m")
+        if fit_off is not None and abs(alt_off) - abs(fit_off) >= REL["gps_tie_m"]:
+            # the measured GPS rules the look-alike out
+            chk["along_gps_tie_break"] = (
+                f"{ambiguous}, but the measured GPS rules it out: the fit is {abs(fit_off):.1f} m "
+                f"from it along the street, the look-alike {abs(alt_off):.1f} m"
+            )
+        else:
+            fails.append(ambiguous)
     if inside_share > REL["max_inside"]:
         fails.append(f"{100 * inside_share:.0f}% of the cameras inside buildings")
     if backward:
@@ -1244,6 +1263,17 @@ def align_camera(
         wmap,
         owalls if owalls is not None else OrientedWalls(A, B, lo, hi),
     )
+    # along the street (the check's own direction): how far the fit sits from the device's measured
+    # GPS, and the look-alike (frames without a measured fix are left out; none: no tie-break)
+    u = np.asarray(checks["along_dir"])
+    meas = [i for i, n in enumerate(names) if meta[n].get("gps")]
+    if meas:
+        g_meas = np.array([enu.xy(*meta[names[i]]["gps"]) for i in meas])
+        checks["along_fit_vs_gps_m"] = float(np.median((cams_xy[meas] - g_meas) @ u))
+        checks["along_second_vs_gps_m"] = (
+            checks["along_fit_vs_gps_m"] + checks["along_second_shift_m"]
+        )
+        checks["along_gps_frames"] = len(meas)
     fails = verdict(checks, float(inside.mean()), backward, max_error)
     if (
         shared
@@ -1435,6 +1465,11 @@ def align_camera(
                 for h in hinfos.values()
                 if h.get("heading_from_facades", {}).get("unconstrained")
             ]
+            + (
+                [checks["along_gps_tie_break"]]
+                if checks.get("along_gps_tie_break")
+                else []
+            )
             + (
                 [
                     f"reconstruction {fold_words(fold)}: "
