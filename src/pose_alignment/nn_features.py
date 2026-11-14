@@ -1,6 +1,4 @@
-"""Fast feature matching for frames close together: learned_features.py with mutual nearest-neighbour
-matching of the ALIKED descriptors instead of LightGlue (no network). Same arguments and outputs
-as learned_features.py (which now takes --matcher nn itself; this keeps the old command working).
+"""The old command for learned_features.py, which now always matches by nearest neighbour.
 
 Usage: python -m pose_alignment.nn_features --images <dir> --out <dir> [--overlap 10] [--masks <dir>]
 """

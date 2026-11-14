@@ -843,7 +843,8 @@ function renderProgress(job) {
   else if (job?.status === "running") {
     const running = state.stages.find((s) => job.stages[s.name] === "running");
     label = running ? `${running.label}…` : "Starting…";
-  } else if (job?.status === "done") label = "Model ready";
+  } else if (job?.status === "done")
+    label = jobWarnings(job).length ? `Model ready, with ${plural(jobWarnings(job).length, "warning")}` : "Model ready";
   else if (job?.status === "failed") label = `Failed: ${job.error || "unknown error"}`;
   $("progLabel").textContent = label;
   $("status").classList.toggle("failed", job?.status === "failed");
@@ -863,9 +864,14 @@ function upsertJob(job) {
   if (i >= 0) state.jobs[i] = job;
   else state.jobs.unshift(job);
 }
-const statusChip = (status) =>
+// What a finished job wants the user to know (e.g. no aerial photo for the area): result.warnings
+const jobWarnings = (job) => job?.result?.warnings || [];
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const statusChip = (status, job) =>
   ({
-    done: `<span class="chip ok">Done</span>`,
+    done: jobWarnings(job).length
+      ? `<span class="chip warn" title="${esc(jobWarnings(job).join("\n"))}">Done · ${plural(jobWarnings(job).length, "warning")}</span>`
+      : `<span class="chip ok">Done</span>`,
     failed: `<span class="chip bad">Failed</span>`,
     running: `<span class="chip run">Running</span>`,
     queued: `<span class="chip">Queued</span>`,
@@ -875,7 +881,7 @@ function renderJobs() {
   $("jobRows").innerHTML = state.jobs
     .map((j) => {
       const chip =
-        statusChip(j.status) +
+        statusChip(j.status, j) +
         (j.options?.profile ? ` <span class="chip" title="Run with Profile this run: open it to see the profile">Profiled</span>` : "") +
         (j.options?.evaluate_geometry || j.options?.evaluate_texture
           ? ` <span class="chip" title="Run with an evaluation (geometry or texture): open it to see the results">Evaluated</span>`
@@ -943,6 +949,7 @@ let jobsTopBefore = null;
 const jobsTop = () => $("jobs").getBoundingClientRect().top;
 
 function openJobModal(job) {
+  closeDeletePanel();
   state.modalJobId = job.id;
   if (!jobDlg.open) jobsTopBefore = jobsTop();
   moveInto($("logSection"), $("jobSide"), { holdSpace: true });
@@ -953,9 +960,14 @@ function openJobModal(job) {
 function renderJobModal(job) {
   if (state.modalJobId !== job.id) return;
   $("jobModalTitle").textContent = job.name;
-  $("jobModalChip").innerHTML = statusChip(job.status);
+  $("jobModalChip").innerHTML = statusChip(job.status, job);
   const done = job.status === "done";
   $("jobModalStats").innerHTML = done ? modelStatsHtml(job) : "";
+  const del = $("jobModalDelete");
+  del.disabled = isActive(job);
+  del.title = isActive(job)
+    ? "A queued or running job can't be deleted"
+    : "Delete this job and its downloaded photos from this computer";
   const dl = $("jobModalDownload");
   if (done) dl.href = `/api/jobs/${job.id}/model.glb?download=true`;
   else dl.removeAttribute("href");
@@ -985,6 +997,16 @@ function jobStageNote(job, text) {
   $("jobStageEmpty").hidden = !text;
 }
 
+// The alignment method a job ran: jobs since it was fixed record it as alignment_method; earlier
+// ones recorded their features and fit, and the earliest neither (ALIKED with the previous fit).
+function alignmentLabel(o) {
+  if (o.alignment_method || (!("features" in o) && "focal_rule" in o)) {
+    return "ALIKED + nearest neighbour · scale from GPS, walls by direction, heading from facades";
+  }
+  const features = { sift: "SIFT", aliked: "ALIKED", aliked_nn: "ALIKED + NN" }[o.features] || "ALIKED";
+  return `${features} · ${o.alignment === "new" ? "scale from GPS, walls by direction, heading from facades" : "previous fit"}`;
+}
+
 // Jobs from before the option existed used Mapillary's raw GPS.
 const POSE_LABELS = {
   colmap: "Aligned to OpenStreetMap",
@@ -1002,10 +1024,20 @@ function jobFactsHtml(job) {
     ["Created", esc(when(job.created_at))],
     ["Duration", esc(duration(job))],
     ["Camera poses", esc(POSE_LABELS[o.poses] || POSE_LABELS.raw) + (o.aligned_only ? " · aligned photos only" : "")],
+    ...(o.poses === "colmap"
+      ? [
+          [
+            "Alignment",
+            esc(
+              alignmentLabel(o),
+            ),
+          ],
+        ]
+      : []),
     [
       "Obstructions",
       o.remove_obstructions
-        ? `${o.fill_obstructions === false ? "Masked, not filled" : "Removed"} · ${esc(o.seg_model)} model`
+        ? `${o.sky_only ? "Sky only, masked" : o.fill_obstructions === false ? "Masked, not filled" : "Removed"} · ${esc(o.seg_model)} model`
         : "Kept",
     ],
     ["Device", esc(o.device || "auto")],
@@ -1028,6 +1060,17 @@ function jobFactsHtml(job) {
     });
     rows.push([`Flagged (${flagged.length})`, items.join("")]);
   }
+  if (o.delete_photos)
+    rows.push([
+      "Photos after the run",
+      job.result?.photos_deleted
+        ? `Deleted · <span class="mono">${fmtBytes(job.result.photos_deleted.bytes)}</span> freed`
+        : job.status === "done"
+          ? "Kept (nothing to delete)"
+          : "To be deleted when done",
+    ]);
+  if (jobWarnings(job).length)
+    rows.push(["Warnings", jobWarnings(job).map((w) => `<div class="warn">${esc(w)}</div>`).join("")]);
   if (job.error) rows.push(["Error", `<span class="bad">${esc(job.error)}</span>`]);
   return rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
 }
@@ -1679,11 +1722,88 @@ $("viewEvaluation").addEventListener("click", () => {
   requestAnimationFrame(() => $("jobEvaluation").scrollIntoView({ behavior: "smooth", block: "start" }));
 });
 
+// ---------- Delete a job (its model, previews, log and alignment folder) ----------
+const fmtBytes = (n) =>
+  n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : n >= 1e6 ? `${Math.round(n / 1e6)} MB` : `${Math.max(1, Math.round(n / 1e3))} kB`;
+
+// Delete asks in the dialog itself (what goes, how big), not with the browser's confirm().
+let pendingDelete = null; // {id, freed} once the sizes are known
+function closeDeletePanel() {
+  pendingDelete = null;
+  $("deletePanel").hidden = true;
+}
+$("jobModalDelete").addEventListener("click", async () => {
+  const job = state.jobs.find((j) => j.id === state.modalJobId);
+  if (!job || isActive(job)) return;
+  const panel = $("deletePanel");
+  pendingDelete = null;
+  $("deleteTitle").textContent = `Delete "${job.name}"?`;
+  $("deleteText").textContent = "Checking what would be removed…";
+  $("deleteConfirm").disabled = true;
+  panel.hidden = false;
+  panel.scrollIntoView({ block: "nearest" });
+  try {
+    const s = await api(`/api/jobs/${job.id}/storage`);
+    if (state.modalJobId !== job.id) return;
+    const items = [`<li>its model, photo previews and log (${fmtBytes(s.job_bytes)})</li>`];
+    if (s.alignment_folder && !s.alignment_kept)
+      items.push(`<li>its alignment folder: downloaded photos, masks and reconstructions (${fmtBytes(s.alignment_bytes)})</li>`);
+    const kept = s.alignment_folder && s.alignment_kept ? `<div>The alignment folder stays: ${esc(s.alignment_kept)}.</div>` : "";
+    const freed = s.job_bytes + (s.alignment_kept ? 0 : s.alignment_bytes);
+    $("deleteText").innerHTML =
+      `<div>This removes from this computer:</div><ul>${items.join("")}</ul>${kept}` +
+      `<div>Frees ${fmtBytes(freed)}. This can't be undone.</div>`;
+    pendingDelete = { id: job.id, freed };
+    $("deleteConfirm").disabled = false;
+    $("deleteConfirm").focus();
+  } catch (e) {
+    $("deleteText").innerHTML = `<span class="bad">Couldn't check this job's files: ${esc(e.message)}</span>`;
+  }
+});
+$("deleteCancel").addEventListener("click", closeDeletePanel);
+$("deleteConfirm").addEventListener("click", async () => {
+  if (!pendingDelete) return;
+  const { id, freed } = pendingDelete;
+  $("deleteConfirm").disabled = true;
+  $("deleteText").textContent = "Deleting…";
+  try {
+    const done = await api(`/api/jobs/${id}`, { method: "DELETE" });
+    closeDeletePanel();
+    onJobDeleted(id);
+    toast(
+      done?.not_removed?.length
+        ? `Deleted from the list, but some files could not be removed: ${done.not_removed.join(", ")}`
+        : `Deleted, freed ${fmtBytes(freed)}`,
+    );
+  } catch (e) {
+    $("deleteText").innerHTML = `<span class="bad">Couldn't delete: ${esc(e.message)}</span>`;
+    $("deleteConfirm").disabled = false;
+  }
+});
+
+// A job deleted here or in another tab: drop it from the list, close its details.
+function onJobDeleted(id) {
+  const had = state.jobs.some((j) => j.id === id);
+  state.jobs = state.jobs.filter((j) => j.id !== id);
+  if (state.modalJobId === id && jobDlg.open) jobDlg.close();
+  if (state.current?.id === id) state.current = null;
+  if (state.shown?.id === id) {
+    state.shown = null;
+    const next = state.jobs.find((j) => j.status === "done");
+    if (next) showJob(next);
+  }
+  if (had) {
+    renderJobs();
+    renderBusy();
+  }
+}
+
 jobDlg.addEventListener("click", (e) => {
   if (e.target === jobDlg || e.target.closest("[data-close]")) jobDlg.close();
 });
 jobDlg.addEventListener("close", () => {
   state.modalJobId = null;
+  closeDeletePanel();
   moveHome(sceneEl);
   moveHome($("logSection"));
   $("stagePlaceholder").hidden = true;
@@ -1718,7 +1838,11 @@ function renderBusy() {
 
 function finishJob(job) {
   if (job.status === "done") {
-    toast(`Model ready: ${job.result?.buildings ?? 0} buildings`);
+    const warned = jobWarnings(job);
+    toast(
+      `Model ready: ${job.result?.buildings ?? 0} buildings` +
+        (warned.length ? `. ${warned[0]}${warned.length > 1 ? ` (+${warned.length - 1} more)` : ""}` : ""),
+    );
     if (state.current?.id === job.id) {
       state.shown = job;
       loadModel(job);
@@ -1807,6 +1931,7 @@ function connectLive() {
     }
     if (msg.type === "snapshot") onSnapshot(msg.jobs);
     else if (msg.type === "job") onJobUpdate(msg.job);
+    else if (msg.type === "job_deleted") onJobDeleted(msg.id);
     else if (msg.type === "log" || msg.type === "progress") onLogMessage(msg);
   });
   ws.addEventListener("close", () => {
@@ -1879,7 +2004,9 @@ function setDeviceButtons(id, value) {
 function applyDefaults(d) {
   $("poses").value = d.poses || "colmap";
   $("fillObs").checked = d.fill_obstructions !== false;
+  $("skyOnly").checked = !!d.sky_only;
   $("seg").checked = d.remove_obstructions;
+  $("deletePhotos").checked = !!d.delete_photos;
   $("model").value = d.seg_model;
   // "cuda" was the GPU button's value before it meant any GPU (NVIDIA or Apple)
   const wanted = d.device === "cuda" ? "gpu" : d.device;
@@ -1892,10 +2019,15 @@ function applyDefaults(d) {
 // each is shown only when it applies (and keeps its setting while hidden).
 function syncOptionRows() {
   $("alignedOnlyRow").hidden = $("poses").value !== "colmap";
-  $("fillObsRow").hidden = !$("seg").checked;
+  // only the aligned poses download photos to this computer
+  $("deletePhotosRow").hidden = $("poses").value !== "colmap";
+  $("skyOnlyRow").hidden = !$("seg").checked;
+  // sky only is masked, never painted over: "Fill obstructions" does not apply
+  $("fillObsRow").hidden = !$("seg").checked || $("skyOnly").checked;
 }
 $("poses").addEventListener("change", syncOptionRows);
 $("seg").addEventListener("change", syncOptionRows);
+$("skyOnly").addEventListener("change", syncOptionRows);
 
 function tokenMessage(text, kind = "") {
   const msg = $("tokenMsg");
@@ -1931,7 +2063,9 @@ async function openSettings(intro = "") {
   if (d) {
     $("defPoses").value = d.poses || "colmap";
     $("defFill").checked = d.fill_obstructions !== false;
+    $("defSkyOnly").checked = !!d.sky_only;
     $("defSeg").checked = d.remove_obstructions;
+    $("defDeletePhotos").checked = !!d.delete_photos;
     $("defModel").value = d.seg_model;
     defDevice = d.device === "cuda" ? "gpu" : d.device;
     setDeviceButtons("defDevice", defDevice);
@@ -2103,8 +2237,10 @@ $("settingsForm").addEventListener("submit", async (e) => {
           poses: $("defPoses").value,
           remove_obstructions: $("defSeg").checked,
           fill_obstructions: $("defFill").checked,
+          sky_only: $("defSkyOnly").checked,
           seg_model: $("defModel").value,
           device: defDevice,
+          delete_photos: $("defDeletePhotos").checked,
         },
       }),
     });
@@ -2140,6 +2276,7 @@ $("go").addEventListener("click", async () => {
         aligned_only: $("poses").value === "colmap" && $("alignedOnly").checked,
         remove_obstructions: $("seg").checked,
         fill_obstructions: $("fillObs").checked,
+        sky_only: $("seg").checked && $("skyOnly").checked,
         seg_model: $("model").value,
         device,
         terrain: $("terrain").checked,
@@ -2147,6 +2284,7 @@ $("go").addEventListener("click", async () => {
         profile: $("profile").checked,
         evaluate_geometry: $("evaluate").checked,
         evaluate_texture: $("evaluateTexture").checked,
+        delete_photos: $("poses").value === "colmap" && $("deletePhotos").checked,
       }),
     });
     // The socket often delivers newer updates for this job (running, first

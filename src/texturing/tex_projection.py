@@ -18,7 +18,7 @@ from common.reporter import Reporter, get_reporter
 from naip.naip import roof_faces, roof_patches
 from data_ingest.pano import PANO_TYPES, crop_view
 from texturing.blend import bake_walls
-from segmentation import build_obstruction_mask, synthesize_texture
+from segmentation import SKY_NAMES, build_obstruction_mask, photo_labels, synthesize_texture
 from segmentation.model import LabelCache, model_id_or_default
 
 CAMERA_HEIGHT_M = 1.6
@@ -32,9 +32,9 @@ DOWNLOAD_WORKERS = 8
 DOWNLOAD_AHEAD = 32
 # Colour (0-255) of faces no street photo covers: roofs, back walls, gaps.
 UNTEXTURED_GREY = 225
-# With fill_obstructions off, each photo's obstruction mask is kept at 1/MASK_SCALE size to
-# score how much of a face it hides; a face then takes the photo with the best
-# frontality x unobstructed share.
+# Each photo's mask (the sky, and the obstructions when they are not painted over) is kept at
+# 1/MASK_SCALE size to score how much of a face it hides; a face then takes the photo with the
+# best frontality x unobstructed share (blend: the masked texels get no weight).
 MASK_SCALE = 8
 
 
@@ -47,6 +47,72 @@ def camera_position(
     return np.array(
         [x, y, ground_z + (CAMERA_HEIGHT_M if height_m is None else height_m)]
     )
+
+
+# Photos whose pose came with the reconstruction's lens (align_poses: camera_model, camera_params at
+# camera_width px) are undistorted to a pinhole with the principal point at the centre before they
+# are projected, so a fisheye's walls sample the right pixels. A fisheye keeps at most this half
+# field of view across the width (the pinhole's focal shrinks to fit it; beyond ~60 deg a pinhole
+# view stretches too much); the parts outside the source photo are masked out.
+FISHEYE_MAX_HALF_FOV_DEG = 60.0
+_UNDISTORT_CACHE: dict = {}
+
+
+def undistorter(meta: dict, w: int, h: int):
+    """(map_x, map_y, pinhole focal in px, invalid mask) to undistort a w x h photo with the
+    lens in meta (COLMAP RADIAL, SIMPLE_RADIAL or RADIAL_FISHEYE), or None when it has no
+    lens or no distortion to remove."""
+    model, params, ref_w = (
+        meta.get("camera_model"),
+        meta.get("camera_params"),
+        meta.get("camera_width"),
+    )
+    if (
+        model not in ("RADIAL", "SIMPLE_RADIAL", "RADIAL_FISHEYE")
+        or not params
+        or not ref_w
+    ):
+        return None
+    s = w / ref_w
+    f, cx, cy = params[0] * s, params[1] * s, params[2] * s
+    k1, k2 = (list(params[3:5]) + [0.0, 0.0])[:2]
+    fisheye = model == "RADIAL_FISHEYE"
+    if not fisheye and abs(k1) < 1e-4 and abs(k2) < 1e-4:
+        return None
+    key = (
+        model,
+        round(f, 3),
+        round(cx, 3),
+        round(cy, 3),
+        round(k1, 7),
+        round(k2, 7),
+        w,
+        h,
+    )
+    if key in _UNDISTORT_CACHE:
+        return _UNDISTORT_CACHE[key]
+    if fisheye:
+        half = min(max(cx, w - cx) / f, np.radians(FISHEYE_MAX_HALF_FOV_DEG))
+        f_new = (w / 2.0) / np.tan(half)
+    else:
+        f_new = f
+    u, v = np.meshgrid(np.arange(w, dtype=np.float64), np.arange(h, dtype=np.float64))
+    x, y = (u - w / 2.0) / f_new, (v - h / 2.0) / f_new
+    r = np.hypot(x, y)
+    if fisheye:  # COLMAP's RADIAL_FISHEYE: the angle off the axis is distorted
+        th = np.arctan(r)
+        thd = th * (1.0 + k1 * th**2 + k2 * th**4)
+        scale = np.where(r > 1e-9, thd / np.maximum(r, 1e-9), 1.0)
+    else:  # RADIAL / SIMPLE_RADIAL on the normalised coordinates
+        r2 = r * r
+        scale = 1.0 + k1 * r2 + k2 * r2 * r2
+    map_x = (f * x * scale + cx).astype(np.float32)
+    map_y = (f * y * scale + cy).astype(np.float32)
+    invalid = ((map_x < 0) | (map_x > w - 1) | (map_y < 0) | (map_y > h - 1)).astype(
+        np.uint8
+    ) * 255
+    _UNDISTORT_CACHE[key] = (map_x, map_y, float(f_new), invalid)
+    return _UNDISTORT_CACHE[key]
 
 
 def _build_K(focal_px: float, w: int, h: int) -> np.ndarray:
@@ -147,6 +213,7 @@ def apply_textures(
     fill_obstructions: bool = True,
     texture_mode: str = "blend",
     photo_mask: dict | None = None,
+    sky_only: bool = False,
 ) -> trimesh.Trimesh:
     """Project street photos onto the mesh.
 
@@ -168,10 +235,12 @@ def apply_textures(
     class maps the pose alignment already made: those photos are not downloaded or
     segmented again.
 
-    With remove_obs, the obstructions (cars, people, poles, ...) are segmented. With
-    fill_obstructions they are painted over (LaMa); without it the photos stay as taken
-    and the masks steer which photo textures a face: the most square-on view that the
-    obstructions hide least.
+    With remove_obs, the obstructions (cars, people, poles, ...) and the sky are segmented.
+    With fill_obstructions the obstructions are painted over (LaMa); without it the photos
+    stay as taken and the masks steer which photo textures a face: the most square-on view
+    that the obstructions hide least. The sky is always masked that way, never painted over:
+    a wall is textured from the photos that show it there, not sky. With sky_only, only the
+    sky is segmented and masked; cars, poles and people stay as taken.
 
     If photo_mask (a dict) is given, photo_mask["mask"] is set to the atlas's texels
     that hold photo texture (uint8, 255 = from a photo; not untextured grey, and not
@@ -199,6 +268,7 @@ def apply_textures(
             fill_obstructions,
             texture_mode,
             photo_mask,
+            sky_only,
         )
 
 
@@ -220,7 +290,10 @@ def _apply_textures(
     fill_obstructions: bool = True,
     texture_mode: str = "blend",
     photo_mask: dict | None = None,
+    sky_only: bool = False,
 ) -> trimesh.Trimesh:
+    # sky only: masked, never painted over (inpainting sky into a facade photo makes nothing)
+    fill_obstructions = fill_obstructions and not sky_only
     center_lon = (bbox.min_lon + bbox.max_lon) / 2
     center_lat = (bbox.min_lat + bbox.max_lat) / 2
     transformer = _get_utm_transformer(center_lon, center_lat)
@@ -315,6 +388,7 @@ def _apply_textures(
         preview_dir = image_dir if len(saved) < max_saved_images else None
         if preview_dir is not None:
             _save_preview(img, preview_dir / f"{img_id}_original.jpg")
+        filled = small_filled = None  # what obstruction removal painted over
         if remove_obs:
             labels = None
             if cached_labels is not None and seg_labels is not None:
@@ -322,11 +396,27 @@ def _apply_textures(
                 if seg is not None:
                     labels = (seg, cached_labels)
                     reused["class maps"] += 1
-            mask = build_obstruction_mask(img, seg_model, seg_device, reporter, labels)
-            if fill_obstructions:
-                img = synthesize_texture(img, mask, reporter, seg_device)
-            # kept small: which pixels are obstructions (scores the views without fill;
-            # with fill, what was painted over, for the texture evaluation's mask)
+            if sky_only:
+                mask = build_obstruction_mask(
+                    img, seg_model, seg_device, reporter, labels, classes=SKY_NAMES
+                )
+            else:
+                # one segmentation for both masks: the obstructions, and the sky
+                if labels is None:
+                    labels = photo_labels(img, seg_model, seg_device, reporter)
+                obstructions = build_obstruction_mask(
+                    img, seg_model, seg_device, reporter, labels
+                )
+                mask = build_obstruction_mask(
+                    img, seg_model, seg_device, reporter, labels, classes=SKY_NAMES
+                )
+                if fill_obstructions:  # painted over; the sky stays masked
+                    img = synthesize_texture(img, obstructions, reporter, seg_device)
+                    filled = obstructions  # for the texture evaluation's mask
+                else:
+                    mask = np.maximum(mask, obstructions)
+            # kept small: which pixels are masked (scores the views), and what was painted
+            # over (the texture evaluation's mask)
             small_mask = cv2.resize(
                 mask,
                 (
@@ -335,15 +425,19 @@ def _apply_textures(
                 ),
                 interpolation=cv2.INTER_AREA,
             )
-            if not fill_obstructions and preview_dir is not None:
-                shaded = img.copy()
-                shaded[mask > 0] = (0.4 * shaded[mask > 0]).astype(np.uint8)
-                img_for_preview = shaded
-            if preview_dir is not None:
-                _save_preview(
-                    img if fill_obstructions else img_for_preview,
-                    preview_dir / f"{img_id}_cleaned.jpg",
+            if filled is not None:
+                small_filled = cv2.resize(
+                    filled,
+                    (
+                        max(1, filled.shape[1] // MASK_SCALE),
+                        max(1, filled.shape[0] // MASK_SCALE),
+                    ),
+                    interpolation=cv2.INTER_AREA,
                 )
+            if preview_dir is not None:
+                shaded = img.copy()  # what is masked, darkened
+                shaded[mask > 0] = (0.4 * shaded[mask > 0]).astype(np.uint8)
+                _save_preview(shaded, preview_dir / f"{img_id}_cleaned.jpg")
         if preview_dir is not None:
             yaw = meta.get("yaw")
             saved.append(
@@ -354,6 +448,43 @@ def _apply_textures(
                     "cleaned": f"{img_id}_cleaned.jpg" if remove_obs else None,
                 }
             )
+        # the reconstruction's lens taken out: a pinhole photo (and obstruction mask) from here on
+        cam_mask = small_mask if remove_obs else None
+        focal_px = meta["focal_length_pixels"]
+        und = undistorter(meta, img.shape[1], img.shape[0])
+        if und is not None:
+            map_x, map_y, f_new, invalid = und
+            img = cv2.remap(
+                img, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT
+            )
+            full = invalid
+            if cam_mask is not None:
+                full = np.maximum(
+                    cv2.remap(mask, map_x, map_y, cv2.INTER_NEAREST), invalid
+                )
+            cam_mask = cv2.resize(
+                full,
+                (
+                    max(1, full.shape[1] // MASK_SCALE),
+                    max(1, full.shape[0] // MASK_SCALE),
+                ),
+                interpolation=cv2.INTER_AREA,
+            )
+            if filled is not None:
+                f_und = cv2.remap(filled, map_x, map_y, cv2.INTER_NEAREST)
+                small_filled = cv2.resize(
+                    f_und,
+                    (
+                        max(1, f_und.shape[1] // MASK_SCALE),
+                        max(1, f_und.shape[0] // MASK_SCALE),
+                    ),
+                    interpolation=cv2.INTER_AREA,
+                )
+            focal_px = f_new * meta["original_width"] / img.shape[1]
+            if not (remove_obs and fill_obstructions):
+                raw = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 95])[
+                    1
+                ].tobytes()
         # Spool to disk without losing quality: the downloaded file as is, or a
         # lossless PNG once obstruction removal has changed the pixels.
         if remove_obs and fill_obstructions:
@@ -372,10 +503,10 @@ def _apply_textures(
                 "img_path": img_path,
                 "w": w,
                 "h": h,
-                "K": _build_K(meta["focal_length_pixels"], w, h),
+                "K": _build_K(focal_px, w, h),
                 "R": _build_R(meta),
-                "mask": small_mask if remove_obs and not fill_obstructions else None,
-                "filled": small_mask if remove_obs and fill_obstructions else None,
+                "mask": cam_mask,
+                "filled": small_filled,
                 # an aligned camera's height is above the road under it, so on terrain
                 # it goes on top of the ground there, like the default height
                 "Cw": camera_position(x, y, terrain, meta.get("camera_height_m")),
@@ -653,6 +784,7 @@ def tex_projection(value, state: PipelineState):
         bbox,
         remove_obs=state.get_metadata("remove_obstructions", True),
         fill_obstructions=state.get_metadata("fill_obstructions", True),
+        sky_only=state.get_metadata("sky_only", False),
         texture_mode=state.get_metadata("texture_mode", "blend"),
         seg_model=state.get_metadata("seg_model", None),
         seg_device=state.get_metadata("seg_device", None),

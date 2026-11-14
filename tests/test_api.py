@@ -833,3 +833,145 @@ def test_an_unavailable_texture_evaluation_keeps_the_job_done(tmp_path):
     assert job["status"] == "done"
     assert job["result"]["texture_evaluation"]["status"] == "unavailable"
     assert client.get(f"/api/jobs/{job['id']}/model.glb").status_code == 200
+
+
+def _aligned_pipeline(roi):
+    """A fake pipeline whose alignment used the ROI folder roi (as align_poses records it)."""
+
+    def align(value, state):
+        state.set_metadata("pose_alignment", {"roi_folder": str(roi), "added": 2})
+        return value
+
+    def factory():
+        pipeline = PipelineChain("aligned")
+        pipeline.add_stage("fetch", fetch, label="Fetch data")
+        pipeline.add_stage("align_poses", align, label="Align poses")
+        pipeline.add_stage("export", export, label="Export")
+        return pipeline
+
+    return factory
+
+
+def test_deleting_a_job_removes_its_files_and_alignment_folder(tmp_path, monkeypatch):
+    from pose_alignment import geo_common
+
+    rois = tmp_path / "alignment"
+    roi = rois / "mapillary_roi_1"
+    (roi / "data" / "mapillary").mkdir(parents=True)
+    (roi / "data" / "mapillary" / "frame_0001.jpg").write_bytes(b"x" * 5000)
+    monkeypatch.setattr(geo_common, "ROIS_DIR", rois)
+    client = make_client(tmp_path / "jobs", _aligned_pipeline(roi))
+
+    job = wait_for(client, client.post("/api/jobs", json={"bbox": BBOX}).json()["id"])
+    assert job["result"]["alignment_folder"] == str(roi)
+    storage = client.get(f"/api/jobs/{job['id']}/storage").json()
+    assert (
+        storage["alignment_folder"] == str(roi) and storage["alignment_bytes"] == 5000
+    )
+    assert storage["alignment_kept"] is None and storage["job_bytes"] > 0
+
+    deleted = client.delete(f"/api/jobs/{job['id']}")
+    assert deleted.status_code == 200 and deleted.json()["not_removed"] == []
+    assert not roi.exists() and not (tmp_path / "jobs" / job["id"]).exists()
+    assert client.get(f"/api/jobs/{job['id']}").status_code == 404
+    # gone from the list of runs, now and after the app restarts
+    assert job["id"] not in [j["id"] for j in client.get("/api/jobs").json()["jobs"]]
+    restarted = make_client(tmp_path / "jobs", _aligned_pipeline(roi))
+    assert job["id"] not in [j["id"] for j in restarted.get("/api/jobs").json()["jobs"]]
+
+
+def test_an_alignment_folder_another_job_uses_is_kept(tmp_path, monkeypatch):
+    from pose_alignment import geo_common
+
+    rois = tmp_path / "alignment"
+    roi = rois / "mapillary_roi_2"
+    roi.mkdir(parents=True)
+    monkeypatch.setattr(geo_common, "ROIS_DIR", rois)
+    client = make_client(tmp_path / "jobs", _aligned_pipeline(roi))
+
+    first = wait_for(client, client.post("/api/jobs", json={"bbox": BBOX}).json()["id"])
+    second = wait_for(
+        client, client.post("/api/jobs", json={"bbox": BBOX}).json()["id"]
+    )
+    storage = client.get(f"/api/jobs/{first['id']}/storage").json()
+    assert second["id"] in storage["alignment_kept"]
+    client.delete(f"/api/jobs/{first['id']}")
+    assert roi.exists()  # still the second job's
+    client.delete(f"/api/jobs/{second['id']}")
+    assert not roi.exists()
+
+
+def test_a_folder_outside_the_alignment_outputs_is_never_deleted(tmp_path, monkeypatch):
+    from pose_alignment import geo_common
+
+    monkeypatch.setattr(geo_common, "ROIS_DIR", tmp_path / "alignment")
+    elsewhere = tmp_path / "my_photos" / "mapillary_roi_9"
+    elsewhere.mkdir(parents=True)
+    client = make_client(tmp_path / "jobs", _aligned_pipeline(elsewhere))
+
+    job = wait_for(client, client.post("/api/jobs", json={"bbox": BBOX}).json()["id"])
+    assert (
+        "not an alignment folder"
+        in client.get(f"/api/jobs/{job['id']}/storage").json()["alignment_kept"]
+    )
+    client.delete(f"/api/jobs/{job['id']}")
+    assert elsewhere.exists()
+
+
+def test_delete_photos_removes_only_the_downloaded_photos(tmp_path, monkeypatch):
+    """With delete_photos, a finished job's Mapillary photos go; their metadata, the alignment's
+    other outputs and the job's model, overlays and previews stay."""
+    from pose_alignment import geo_common
+
+    rois = tmp_path / "alignment"
+    roi = rois / "mapillary_roi_3"
+    seq = roi / "data" / "mapillary" / "line1_cam0_abc"
+    (roi / "data" / "mapillary" / "originals").mkdir(parents=True)
+    seq.mkdir(parents=True)
+    (seq / "frame_0001.jpg").write_bytes(b"x" * 3000)
+    (seq / "cameras.json").write_text("{}")
+    (roi / "data" / "mapillary" / "originals" / "123.jpg").write_bytes(b"x" * 7000)
+    (roi / "data" / "masks").mkdir(parents=True)
+    (roi / "data" / "masks" / "frame_0001.png").write_bytes(b"m")
+    monkeypatch.setattr(geo_common, "ROIS_DIR", rois)
+    client = make_client(tmp_path / "jobs", _aligned_pipeline(roi))
+
+    created = client.post("/api/jobs", json={"bbox": BBOX, "delete_photos": True}).json()
+    assert created["options"]["delete_photos"] is True
+    job = wait_for(client, created["id"])
+    assert job["status"] == "done"
+    assert job["result"]["photos_deleted"] == {"files": 2, "bytes": 10000}
+    assert not (seq / "frame_0001.jpg").exists()
+    assert not (roi / "data" / "mapillary" / "originals" / "123.jpg").exists()
+    assert (seq / "cameras.json").exists() and (roi / "data" / "masks" / "frame_0001.png").exists()
+    job_dir = tmp_path / "jobs" / job["id"]
+    assert (job_dir / "model.glb").exists() and (job_dir / "images").exists()
+    assert "Deleted 2 Mapillary photos" in client.get(f"/api/jobs/{job['id']}/log").text
+
+
+def test_photos_are_kept_by_default_and_for_a_shared_folder(tmp_path, monkeypatch):
+    from pose_alignment import geo_common
+
+    rois = tmp_path / "alignment"
+    roi = rois / "mapillary_roi_4"
+    (roi / "data" / "mapillary").mkdir(parents=True)
+    photo = roi / "data" / "mapillary" / "frame_0001.jpg"
+    photo.write_bytes(b"x" * 100)
+    monkeypatch.setattr(geo_common, "ROIS_DIR", rois)
+    client = make_client(tmp_path / "jobs", _aligned_pipeline(roi))
+
+    first = wait_for(client, client.post("/api/jobs", json={"bbox": BBOX}).json()["id"])
+    assert first["options"]["delete_photos"] is False and photo.exists()
+    # the second job asks to delete them, but the first job uses the same folder
+    second = wait_for(
+        client,
+        client.post("/api/jobs", json={"bbox": BBOX, "delete_photos": True}).json()["id"],
+    )
+    assert second["status"] == "done" and "photos_deleted" not in second["result"]
+    assert photo.exists()
+
+
+def test_delete_photos_default_can_be_saved(tmp_path):
+    client = make_client(tmp_path)
+    saved = client.put("/api/settings", json={"defaults": {"delete_photos": True}}).json()
+    assert saved["defaults"]["delete_photos"] is True

@@ -120,20 +120,40 @@
             <span class="track"></span><span class="knob"></span>
           </label>
         </div>
+        <div class="opt-row" id="deletePhotosRow">
+          <div class="text">
+            <strong id="deletePhotosLabel">Delete photos when done</strong>
+            <span id="deletePhotosHint">Free the space the downloaded Mapillary photos take; the model and its texture stay</span>
+          </div>
+          <label class="switch" for="deletePhotos">
+            <input id="deletePhotos" type="checkbox" aria-labelledby="deletePhotosLabel" aria-describedby="deletePhotosHint">
+            <span class="track"></span><span class="knob"></span>
+          </label>
+        </div>
         <div class="opt-row">
           <div class="text">
             <strong id="segLabel">Remove obstructions</strong>
-            <span id="segHint">Find cars, poles and people in the facade photos</span>
+            <span id="segHint">Find cars, poles, people and the sky in the facade photos, so none of them ends up on a wall</span>
           </div>
           <label class="switch" for="seg">
             <input id="seg" type="checkbox" checked aria-labelledby="segLabel" aria-describedby="segHint">
             <span class="track"></span><span class="knob"></span>
           </label>
         </div>
+        <div class="opt-row" id="skyOnlyRow">
+          <div class="text">
+            <strong id="skyOnlyLabel">Sky only</strong>
+            <span id="skyOnlyHint">Instead, remove just the sky, so it is never painted onto a wall; cars, poles and people stay as taken</span>
+          </div>
+          <label class="switch" for="skyOnly">
+            <input id="skyOnly" type="checkbox" aria-labelledby="skyOnlyLabel" aria-describedby="skyOnlyHint">
+            <span class="track"></span><span class="knob"></span>
+          </label>
+        </div>
         <div class="opt-row" id="fillObsRow">
           <div class="text">
             <strong id="fillObsLabel">Fill obstructions</strong>
-            <span id="fillObsHint">Paint over them (LaMa; slow without a GPU). Off: keep the photos as taken, and each facade takes the photo they hide least</span>
+            <span id="fillObsHint">Paint over cars, poles and people (LaMa; slow without a GPU). Off: keep the photos as taken, and each facade takes the photo they hide least. The sky is never painted over, only left out</span>
           </div>
           <label class="switch" for="fillObs">
             <input id="fillObs" type="checkbox" checked aria-labelledby="fillObsLabel" aria-describedby="fillObsHint">
@@ -341,11 +361,23 @@
       <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 2v8M4.5 6.5 8 10l3.5-3.5M3 13h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
       .glb
     </a>
+    <button class="btn danger" id="jobModalDelete" type="button" title="Delete this job and its downloaded photos from this computer">
+      <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Delete
+    </button>
     <button class="btn icon" type="button" data-close autofocus aria-label="Close">
       <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
     </button>
   </div>
   <div class="modal-body job-body">
+    <div class="delete-panel" id="deletePanel" role="alertdialog" aria-labelledby="deleteTitle" aria-describedby="deleteText" hidden>
+      <strong id="deleteTitle">Delete this job?</strong>
+      <div id="deleteText">Checking what would be removed…</div>
+      <div class="delete-actions">
+        <button class="btn danger" type="button" id="deleteConfirm" disabled>Delete</button>
+        <button class="btn" type="button" id="deleteCancel">Cancel</button>
+      </div>
+    </div>
     <div class="job-top">
       <div class="stage job-stage" id="jobStage">
         <div class="stage-empty" id="jobStageEmpty" hidden></div>
@@ -433,7 +465,7 @@
       <div class="opt-row">
         <div class="text">
           <strong id="defSegLabel">Remove obstructions</strong>
-          <span id="defSegHint">Find cars, poles and people in the facade photos</span>
+          <span id="defSegHint">Find cars, poles, people and the sky in the facade photos, so none of them ends up on a wall</span>
         </div>
         <label class="switch" for="defSeg">
           <input id="defSeg" type="checkbox" aria-labelledby="defSegLabel" aria-describedby="defSegHint">
@@ -442,11 +474,31 @@
       </div>
       <div class="opt-row">
         <div class="text">
+          <strong id="defSkyOnlyLabel">Sky only</strong>
+          <span id="defSkyOnlyHint">Remove just the sky; cars, poles and people stay as taken</span>
+        </div>
+        <label class="switch" for="defSkyOnly">
+          <input id="defSkyOnly" type="checkbox" aria-labelledby="defSkyOnlyLabel" aria-describedby="defSkyOnlyHint">
+          <span class="track"></span><span class="knob"></span>
+        </label>
+      </div>
+      <div class="opt-row">
+        <div class="text">
           <strong id="defFillLabel">Fill obstructions</strong>
-          <span id="defFillHint">Paint over them (LaMa), or keep the photos as taken</span>
+          <span id="defFillHint">Paint over cars, poles and people (LaMa), or keep the photos as taken; the sky is only left out</span>
         </div>
         <label class="switch" for="defFill">
           <input id="defFill" type="checkbox" aria-labelledby="defFillLabel" aria-describedby="defFillHint">
+          <span class="track"></span><span class="knob"></span>
+        </label>
+      </div>
+      <div class="opt-row">
+        <div class="text">
+          <strong id="defDeletePhotosLabel">Delete photos when done</strong>
+          <span id="defDeletePhotosHint">With aligned poses: free the space the downloaded Mapillary photos take; the model and its texture stay</span>
+        </div>
+        <label class="switch" for="defDeletePhotos">
+          <input id="defDeletePhotos" type="checkbox" aria-labelledby="defDeletePhotosLabel" aria-describedby="defDeletePhotosHint">
           <span class="track"></span><span class="knob"></span>
         </label>
       </div>

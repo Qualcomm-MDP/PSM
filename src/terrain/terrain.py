@@ -15,7 +15,8 @@ from trimesh.visual.material import PBRMaterial
 from common import PipelineState
 from common.MeshUtils import _get_utm_transformer
 from common.constants import BoundingBox
-from common.reporter import Reporter, get_reporter
+from common.http_retry import get_with_retries
+from common.reporter import get_reporter, notify, Reporter
 
 TERRARIUM_URL = (
     "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
@@ -113,8 +114,9 @@ def terrarium_sampler(
     session = requests.Session()
     for ty in range(ty0, ty1 + 1):
         for tx in range(tx0, tx1 + 1):
-            r = session.get(TERRARIUM_URL.format(z=zoom, x=tx, y=ty), timeout=30)
-            r.raise_for_status()
+            r = get_with_retries(
+                session, TERRARIUM_URL.format(z=zoom, x=tx, y=ty), timeout=30
+            )
             rgb = np.asarray(Image.open(io.BytesIO(r.content)).convert("RGB"))
             r0, c0 = (ty - ty0) * 256, (tx - tx0) * 256
             mosaic[r0 : r0 + 256, c0 : c0 + 256] = decode_terrarium(rgb)
@@ -177,5 +179,15 @@ def terrain_stage(value, state: PipelineState):
         terrain = build_terrain(state.require_metadata("bbox"), reporter=reporter)
         state.set_metadata("terrain", terrain)
     except Exception as exc:  # noqa: BLE001 - flat ground is the old behaviour
-        reporter.warning(f"Terrain failed ({exc}); continuing with flat ground")
+        notify(
+            state,
+            f"No terrain for this area: the elevation download failed ({_short_error(exc)}); "
+            "the model sits on flat ground",
+        )
     return value
+
+
+def _short_error(exc: Exception) -> str:
+    """The error without a long request URL (the web app shows it to the user)."""
+    text = str(exc)
+    return text.split(" for url: ")[0] if " for url: " in text else text[:200]
