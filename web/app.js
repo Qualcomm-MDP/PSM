@@ -513,6 +513,194 @@ function resetView() {
 $("resetView").addEventListener("click", resetView);
 $("resetView2").addEventListener("click", resetView);
 
+// ---------- Image capture ----------
+// Saves the current view as a PNG at a chosen resolution and focal length.
+// The focal length is 35 mm-equivalent: the image is 36 mm wide, so in pixels
+// fx = fy = focal / 36 × width, with the principal point at the image centre.
+const SENSOR_WIDTH_MM = 36;
+const fovDegrees = (pixels, focalPx) => THREE.MathUtils.radToDeg(2 * Math.atan(pixels / (2 * focalPx)));
+const focalPixels = (width, focalMm) => (focalMm / SENSOR_WIDTH_MM) * width;
+
+function captureLimit() {
+  const gl = renderer.getContext();
+  return Math.min(gl.getParameter(gl.MAX_RENDERBUFFER_SIZE), ...gl.getParameter(gl.MAX_VIEWPORT_DIMS));
+}
+
+// This borrows the preview's renderer for one frame: its textures can't be
+// shared with another, and a render target would skip the sRGB output step.
+// Everything is put back before the browser next paints, so the preview doesn't
+// flicker. toBlob takes its copy of the canvas straight away; only encoding is async.
+function renderCapture(width, height, focalMm) {
+  const size = renderer.getSize(new THREE.Vector2());
+  const pixelRatio = renderer.getPixelRatio();
+  const { fov, aspect } = camera;
+  const gl = renderer.getContext();
+  try {
+    renderer.setDrawingBufferSize(width, height, 1);
+    // Browsers shrink an oversized canvas silently instead of failing.
+    if (gl.drawingBufferWidth !== width || gl.drawingBufferHeight !== height) {
+      throw new Error(`This browser can't render ${width} × ${height}. Try a smaller size.`);
+    }
+    camera.fov = fovDegrees(height, focalPixels(width, focalMm));
+    camera.aspect = width / height;
+    camera.updateProjectionMatrix();
+    renderer.render(scene, camera);
+    return new Promise((resolve, reject) =>
+      renderer.domElement.toBlob(
+        (blob) => (blob ? resolve(blob) : reject(new Error("The browser couldn't encode the image."))),
+        "image/png",
+      ),
+    );
+  } finally {
+    camera.fov = fov;
+    camera.aspect = aspect;
+    camera.updateProjectionMatrix();
+    renderer.setDrawingBufferSize(size.x, size.y, pixelRatio);
+  }
+}
+
+// The button lives inside #scene so it follows the preview into both dialogs.
+const captureBtn = document.createElement("button");
+captureBtn.className = "btn small";
+captureBtn.type = "button";
+captureBtn.hidden = true;
+captureBtn.title = "Save this view as an image";
+captureBtn.style.cssText = "position: absolute; z-index: 1; right: 12px; bottom: 12px;";
+captureBtn.innerHTML = `
+  <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 5.5h2.5L6 3.5h4l1.5 2H14v7H2z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><circle cx="8" cy="8.75" r="2" stroke="currentColor" stroke-width="1.4"/></svg>
+  Capture`;
+sceneEl.appendChild(captureBtn);
+
+const captureDlg = document.createElement("dialog");
+captureDlg.className = "modal";
+captureDlg.setAttribute("aria-labelledby", "captureTitle");
+captureDlg.style.cssText = "width: min(360px, calc(100vw - 32px)); height: fit-content;";
+captureDlg.innerHTML = `
+  <form id="captureForm">
+    <div class="modal-head">
+      <h2 id="captureTitle" style="flex: 1">Capture image</h2>
+      <button class="btn icon" type="button" data-close aria-label="Close">
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px">
+        <div class="field">
+          <label for="captureWidth">Width (px)</label>
+          <input id="captureWidth" type="number" min="1" step="1" value="1920" required />
+        </div>
+        <div class="field">
+          <label for="captureHeight">Height (px)</label>
+          <input id="captureHeight" type="number" min="1" step="1" value="1080" required />
+        </div>
+      </div>
+      <div class="field">
+        <label for="captureFocal">Focal length (mm, 35 mm equiv.)</label>
+        <input id="captureFocal" type="number" min="1" step="any" value="28" required />
+      </div>
+      <span class="stats" id="captureInfo"></span>
+    </div>
+    <div class="modal-foot">
+      <button class="btn primary" type="submit">Save PNG</button>
+    </div>
+  </form>`;
+document.body.appendChild(captureDlg);
+
+function renderCaptureInfo() {
+  const width = $("captureWidth").valueAsNumber;
+  const height = $("captureHeight").valueAsNumber;
+  const focal = focalPixels(width, $("captureFocal").valueAsNumber);
+  $("captureInfo").textContent =
+    width > 0 && height > 0 && focal > 0
+      ? `${fovDegrees(width, focal).toFixed(1)}° × ${fovDegrees(height, focal).toFixed(1)}° · f ${Math.round(focal)} px`
+      : "";
+}
+
+captureBtn.addEventListener("click", () => {
+  const limit = captureLimit();
+  $("captureWidth").max = limit;
+  $("captureHeight").max = limit;
+  renderCaptureInfo();
+  captureDlg.showModal();
+});
+captureDlg.addEventListener("input", renderCaptureInfo);
+captureDlg.addEventListener("click", (e) => {
+  if (e.target === captureDlg || e.target.closest("[data-close]")) captureDlg.close();
+});
+$("captureForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  captureDlg.close();
+  const width = $("captureWidth").valueAsNumber;
+  const height = $("captureHeight").valueAsNumber;
+  const focal = $("captureFocal").valueAsNumber;
+  try {
+    const blob = await renderCapture(width, height, focal);
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `capture-${state.modelJobId}-${width}x${height}-${focal}mm.png`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast(`Saved ${width} × ${height} image`);
+  } catch (err) {
+    toast(err.message || String(err));
+  }
+});
+
+// ---------- Texture channels: RGBA (blend by alpha) or RGB (ignore alpha) ----------
+// The textured overlay's alpha holds per-face confidence (glTF alphaMode BLEND,
+// which three.js loads as transparent). RGB draws the same textures opaque,
+// showing only their colour channels. Each material's own alpha settings are
+// kept so RGBA restores exactly what the .glb asked for.
+let textureMode = "rgba";
+try {
+  if (localStorage.getItem("psm-texture-mode") === "rgb") textureMode = "rgb";
+} catch {}
+function renderTextureToggle() {
+  const input = $("textureModeInput");
+  input.checked = textureMode === "rgba";
+  $("textureModeState").textContent = input.disabled ? "N/A" : input.checked ? "ON" : "OFF";
+}
+renderTextureToggle();
+
+function modelMaterials(obj) {
+  const out = [];
+  obj.traverse((o) => {
+    const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+    out.push(...mats);
+  });
+  return out;
+}
+// Returns whether any material uses alpha, i.e. whether the toggle changes anything.
+function rememberAlpha(obj) {
+  let usesAlpha = false;
+  for (const m of modelMaterials(obj)) {
+    m.userData.alpha = { transparent: m.transparent, alphaTest: m.alphaTest, depthWrite: m.depthWrite };
+    if (m.transparent || m.alphaTest > 0) usesAlpha = true;
+  }
+  return usesAlpha;
+}
+function applyTextureMode() {
+  if (!model) return;
+  const rgb = textureMode === "rgb";
+  for (const m of modelMaterials(model)) {
+    const a = m.userData.alpha;
+    if (!a) continue;
+    m.transparent = rgb ? false : a.transparent;
+    m.alphaTest = rgb ? 0 : a.alphaTest;
+    m.depthWrite = rgb ? true : a.depthWrite;
+    m.needsUpdate = true; // transparency and alphaTest are compiled into the shader
+  }
+}
+$("textureModeInput").addEventListener("change", (e) => {
+  textureMode = e.target.checked ? "rgba" : "rgb";
+  try {
+    localStorage.setItem("psm-texture-mode", textureMode);
+  } catch {}
+  renderTextureToggle();
+  applyTextureMode();
+});
+
 async function loadModel(job) {
   // Only the latest request may change the scene: switching jobs quickly can
   // make an older model (or its error) arrive after the newer one.
@@ -549,8 +737,18 @@ async function loadModel(job) {
         if ("metalness" in m && !m.metalnessMap) m.metalness = 0;
       }
     });
+    // Always shown once a model is up; greyed out when it has no confidence (alpha) channel.
+    const hasAlpha = rememberAlpha(model);
+    $("textureMode").hidden = false;
+    $("textureModeInput").disabled = !hasAlpha;
+    $("textureMode").title = hasAlpha
+      ? "ON (RGBA): blend textures by their alpha (confidence) channel. OFF (RGB): ignore alpha and draw textures fully opaque."
+      : "This model has no confidence (alpha) channel, so there is nothing to toggle.";
+    renderTextureToggle();
+    applyTextureMode();
     scene.add(model);
     frameModel();
+    captureBtn.hidden = false;
     state.modelJobId = job.id;
     empty.hidden = true;
     jobStageNote(job, "");
@@ -843,7 +1041,8 @@ function renderProgress(job) {
   else if (job?.status === "running") {
     const running = state.stages.find((s) => job.stages[s.name] === "running");
     label = running ? `${running.label}…` : "Starting…";
-  } else if (job?.status === "done") label = "Model ready";
+  } else if (job?.status === "done")
+    label = jobWarnings(job).length ? `Model ready, with ${plural(jobWarnings(job).length, "warning")}` : "Model ready";
   else if (job?.status === "failed") label = `Failed: ${job.error || "unknown error"}`;
   $("progLabel").textContent = label;
   $("status").classList.toggle("failed", job?.status === "failed");
@@ -863,9 +1062,14 @@ function upsertJob(job) {
   if (i >= 0) state.jobs[i] = job;
   else state.jobs.unshift(job);
 }
-const statusChip = (status) =>
+// What a finished job wants the user to know (e.g. no aerial photo for the area): result.warnings
+const jobWarnings = (job) => job?.result?.warnings || [];
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const statusChip = (status, job) =>
   ({
-    done: `<span class="chip ok">Done</span>`,
+    done: jobWarnings(job).length
+      ? `<span class="chip warn" title="${esc(jobWarnings(job).join("\n"))}">Done · ${plural(jobWarnings(job).length, "warning")}</span>`
+      : `<span class="chip ok">Done</span>`,
     failed: `<span class="chip bad">Failed</span>`,
     running: `<span class="chip run">Running</span>`,
     queued: `<span class="chip">Queued</span>`,
@@ -875,7 +1079,7 @@ function renderJobs() {
   $("jobRows").innerHTML = state.jobs
     .map((j) => {
       const chip =
-        statusChip(j.status) +
+        statusChip(j.status, j) +
         (j.options?.profile ? ` <span class="chip" title="Run with Profile this run: open it to see the profile">Profiled</span>` : "") +
         (j.options?.evaluate_geometry || j.options?.evaluate_texture
           ? ` <span class="chip" title="Run with an evaluation (geometry or texture): open it to see the results">Evaluated</span>`
@@ -943,6 +1147,7 @@ let jobsTopBefore = null;
 const jobsTop = () => $("jobs").getBoundingClientRect().top;
 
 function openJobModal(job) {
+  closeDeletePanel();
   state.modalJobId = job.id;
   if (!jobDlg.open) jobsTopBefore = jobsTop();
   moveInto($("logSection"), $("jobSide"), { holdSpace: true });
@@ -953,9 +1158,14 @@ function openJobModal(job) {
 function renderJobModal(job) {
   if (state.modalJobId !== job.id) return;
   $("jobModalTitle").textContent = job.name;
-  $("jobModalChip").innerHTML = statusChip(job.status);
+  $("jobModalChip").innerHTML = statusChip(job.status, job);
   const done = job.status === "done";
   $("jobModalStats").innerHTML = done ? modelStatsHtml(job) : "";
+  const del = $("jobModalDelete");
+  del.disabled = isActive(job);
+  del.title = isActive(job)
+    ? "A queued or running job can't be deleted"
+    : "Delete this job and its downloaded photos from this computer";
   const dl = $("jobModalDownload");
   if (done) dl.href = `/api/jobs/${job.id}/model.glb?download=true`;
   else dl.removeAttribute("href");
@@ -985,6 +1195,16 @@ function jobStageNote(job, text) {
   $("jobStageEmpty").hidden = !text;
 }
 
+// The alignment method a job ran: jobs since it was fixed record it as alignment_method; earlier
+// ones recorded their features and fit, and the earliest neither (ALIKED with the previous fit).
+function alignmentLabel(o) {
+  if (o.alignment_method || (!("features" in o) && "focal_rule" in o)) {
+    return "ALIKED + nearest neighbour · scale from GPS, walls by direction, heading from facades";
+  }
+  const features = { sift: "SIFT", aliked: "ALIKED", aliked_nn: "ALIKED + NN" }[o.features] || "ALIKED";
+  return `${features} · ${o.alignment === "new" ? "scale from GPS, walls by direction, heading from facades" : "previous fit"}`;
+}
+
 // Jobs from before the option existed used Mapillary's raw GPS.
 const POSE_LABELS = {
   colmap: "Aligned to OpenStreetMap",
@@ -1002,10 +1222,20 @@ function jobFactsHtml(job) {
     ["Created", esc(when(job.created_at))],
     ["Duration", esc(duration(job))],
     ["Camera poses", esc(POSE_LABELS[o.poses] || POSE_LABELS.raw) + (o.aligned_only ? " · aligned photos only" : "")],
+    ...(o.poses === "colmap"
+      ? [
+          [
+            "Alignment",
+            esc(
+              alignmentLabel(o),
+            ),
+          ],
+        ]
+      : []),
     [
       "Obstructions",
       o.remove_obstructions
-        ? `${o.fill_obstructions === false ? "Masked, not filled" : "Removed"} · ${esc(o.seg_model)} model`
+        ? `${o.sky_only ? "Sky only, masked" : o.fill_obstructions === false ? "Masked, not filled" : "Removed"} · ${esc(o.seg_model)} model`
         : "Kept",
     ],
     ["Device", esc(o.device || "auto")],
@@ -1019,15 +1249,17 @@ function jobFactsHtml(job) {
   if (job.result?.photos != null) rows.push(["Photos", `<span class="mono">${job.result.photos}</span>`]);
   if (job.result?.aligned_photos != null)
     rows.push(["Aligned photos", `<span class="mono">${job.result.aligned_photos}</span>`]);
-  const flagged = job.result?.flagged || [];
-  if (flagged.length) {
-    const items = flagged.map((f) => {
-      const [type, id] = f.osm.split(" ");
-      const url = `https://www.openstreetmap.org/${esc(type)}/${esc(id)}`;
-      return `<div><a href="${url}" target="_blank" rel="noopener">${esc(f.osm)}</a>: ${esc(f.reason)}</div>`;
-    });
-    rows.push([`Flagged (${flagged.length})`, items.join("")]);
-  }
+  if (o.delete_photos)
+    rows.push([
+      "Photos after the run",
+      job.result?.photos_deleted
+        ? `Deleted · <span class="mono">${fmtBytes(job.result.photos_deleted.bytes)}</span> freed`
+        : job.status === "done"
+          ? "Kept (nothing to delete)"
+          : "To be deleted when done",
+    ]);
+  if (jobWarnings(job).length)
+    rows.push(["Warnings", jobWarnings(job).map((w) => `<div class="warn">${esc(w)}</div>`).join("")]);
   if (job.error) rows.push(["Error", `<span class="bad">${esc(job.error)}</span>`]);
   return rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
 }
@@ -1679,11 +1911,88 @@ $("viewEvaluation").addEventListener("click", () => {
   requestAnimationFrame(() => $("jobEvaluation").scrollIntoView({ behavior: "smooth", block: "start" }));
 });
 
+// ---------- Delete a job (its model, previews, log and alignment folder) ----------
+const fmtBytes = (n) =>
+  n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : n >= 1e6 ? `${Math.round(n / 1e6)} MB` : `${Math.max(1, Math.round(n / 1e3))} kB`;
+
+// Delete asks in the dialog itself (what goes, how big), not with the browser's confirm().
+let pendingDelete = null; // {id, freed} once the sizes are known
+function closeDeletePanel() {
+  pendingDelete = null;
+  $("deletePanel").hidden = true;
+}
+$("jobModalDelete").addEventListener("click", async () => {
+  const job = state.jobs.find((j) => j.id === state.modalJobId);
+  if (!job || isActive(job)) return;
+  const panel = $("deletePanel");
+  pendingDelete = null;
+  $("deleteTitle").textContent = `Delete "${job.name}"?`;
+  $("deleteText").textContent = "Checking what would be removed…";
+  $("deleteConfirm").disabled = true;
+  panel.hidden = false;
+  panel.scrollIntoView({ block: "nearest" });
+  try {
+    const s = await api(`/api/jobs/${job.id}/storage`);
+    if (state.modalJobId !== job.id) return;
+    const items = [`<li>its model, photo previews and log (${fmtBytes(s.job_bytes)})</li>`];
+    if (s.alignment_folder && !s.alignment_kept)
+      items.push(`<li>its alignment folder: downloaded photos, masks and reconstructions (${fmtBytes(s.alignment_bytes)})</li>`);
+    const kept = s.alignment_folder && s.alignment_kept ? `<div>The alignment folder stays: ${esc(s.alignment_kept)}.</div>` : "";
+    const freed = s.job_bytes + (s.alignment_kept ? 0 : s.alignment_bytes);
+    $("deleteText").innerHTML =
+      `<div>This removes from this computer:</div><ul>${items.join("")}</ul>${kept}` +
+      `<div>Frees ${fmtBytes(freed)}. This can't be undone.</div>`;
+    pendingDelete = { id: job.id, freed };
+    $("deleteConfirm").disabled = false;
+    $("deleteConfirm").focus();
+  } catch (e) {
+    $("deleteText").innerHTML = `<span class="bad">Couldn't check this job's files: ${esc(e.message)}</span>`;
+  }
+});
+$("deleteCancel").addEventListener("click", closeDeletePanel);
+$("deleteConfirm").addEventListener("click", async () => {
+  if (!pendingDelete) return;
+  const { id, freed } = pendingDelete;
+  $("deleteConfirm").disabled = true;
+  $("deleteText").textContent = "Deleting…";
+  try {
+    const done = await api(`/api/jobs/${id}`, { method: "DELETE" });
+    closeDeletePanel();
+    onJobDeleted(id);
+    toast(
+      done?.not_removed?.length
+        ? `Deleted from the list, but some files could not be removed: ${done.not_removed.join(", ")}`
+        : `Deleted, freed ${fmtBytes(freed)}`,
+    );
+  } catch (e) {
+    $("deleteText").innerHTML = `<span class="bad">Couldn't delete: ${esc(e.message)}</span>`;
+    $("deleteConfirm").disabled = false;
+  }
+});
+
+// A job deleted here or in another tab: drop it from the list, close its details.
+function onJobDeleted(id) {
+  const had = state.jobs.some((j) => j.id === id);
+  state.jobs = state.jobs.filter((j) => j.id !== id);
+  if (state.modalJobId === id && jobDlg.open) jobDlg.close();
+  if (state.current?.id === id) state.current = null;
+  if (state.shown?.id === id) {
+    state.shown = null;
+    const next = state.jobs.find((j) => j.status === "done");
+    if (next) showJob(next);
+  }
+  if (had) {
+    renderJobs();
+    renderBusy();
+  }
+}
+
 jobDlg.addEventListener("click", (e) => {
   if (e.target === jobDlg || e.target.closest("[data-close]")) jobDlg.close();
 });
 jobDlg.addEventListener("close", () => {
   state.modalJobId = null;
+  closeDeletePanel();
   moveHome(sceneEl);
   moveHome($("logSection"));
   $("stagePlaceholder").hidden = true;
@@ -1718,7 +2027,11 @@ function renderBusy() {
 
 function finishJob(job) {
   if (job.status === "done") {
-    toast(`Model ready: ${job.result?.buildings ?? 0} buildings`);
+    const warned = jobWarnings(job);
+    toast(
+      `Model ready: ${job.result?.buildings ?? 0} buildings` +
+        (warned.length ? `. ${warned[0]}${warned.length > 1 ? ` (+${warned.length - 1} more)` : ""}` : ""),
+    );
     if (state.current?.id === job.id) {
       state.shown = job;
       loadModel(job);
@@ -1807,6 +2120,7 @@ function connectLive() {
     }
     if (msg.type === "snapshot") onSnapshot(msg.jobs);
     else if (msg.type === "job") onJobUpdate(msg.job);
+    else if (msg.type === "job_deleted") onJobDeleted(msg.id);
     else if (msg.type === "log" || msg.type === "progress") onLogMessage(msg);
   });
   ws.addEventListener("close", () => {
@@ -1879,7 +2193,9 @@ function setDeviceButtons(id, value) {
 function applyDefaults(d) {
   $("poses").value = d.poses || "colmap";
   $("fillObs").checked = d.fill_obstructions !== false;
+  $("skyOnly").checked = !!d.sky_only;
   $("seg").checked = d.remove_obstructions;
+  $("deletePhotos").checked = !!d.delete_photos;
   $("model").value = d.seg_model;
   // "cuda" was the GPU button's value before it meant any GPU (NVIDIA or Apple)
   const wanted = d.device === "cuda" ? "gpu" : d.device;
@@ -1892,10 +2208,15 @@ function applyDefaults(d) {
 // each is shown only when it applies (and keeps its setting while hidden).
 function syncOptionRows() {
   $("alignedOnlyRow").hidden = $("poses").value !== "colmap";
-  $("fillObsRow").hidden = !$("seg").checked;
+  // only the aligned poses download photos to this computer
+  $("deletePhotosRow").hidden = $("poses").value !== "colmap";
+  $("skyOnlyRow").hidden = !$("seg").checked;
+  // sky only is masked, never painted over: "Fill obstructions" does not apply
+  $("fillObsRow").hidden = !$("seg").checked || $("skyOnly").checked;
 }
 $("poses").addEventListener("change", syncOptionRows);
 $("seg").addEventListener("change", syncOptionRows);
+$("skyOnly").addEventListener("change", syncOptionRows);
 
 function tokenMessage(text, kind = "") {
   const msg = $("tokenMsg");
@@ -1931,7 +2252,9 @@ async function openSettings(intro = "") {
   if (d) {
     $("defPoses").value = d.poses || "colmap";
     $("defFill").checked = d.fill_obstructions !== false;
+    $("defSkyOnly").checked = !!d.sky_only;
     $("defSeg").checked = d.remove_obstructions;
+    $("defDeletePhotos").checked = !!d.delete_photos;
     $("defModel").value = d.seg_model;
     defDevice = d.device === "cuda" ? "gpu" : d.device;
     setDeviceButtons("defDevice", defDevice);
@@ -2103,8 +2426,10 @@ $("settingsForm").addEventListener("submit", async (e) => {
           poses: $("defPoses").value,
           remove_obstructions: $("defSeg").checked,
           fill_obstructions: $("defFill").checked,
+          sky_only: $("defSkyOnly").checked,
           seg_model: $("defModel").value,
           device: defDevice,
+          delete_photos: $("defDeletePhotos").checked,
         },
       }),
     });
@@ -2140,6 +2465,7 @@ $("go").addEventListener("click", async () => {
         aligned_only: $("poses").value === "colmap" && $("alignedOnly").checked,
         remove_obstructions: $("seg").checked,
         fill_obstructions: $("fillObs").checked,
+        sky_only: $("seg").checked && $("skyOnly").checked,
         seg_model: $("model").value,
         device,
         terrain: $("terrain").checked,
@@ -2147,6 +2473,7 @@ $("go").addEventListener("click", async () => {
         profile: $("profile").checked,
         evaluate_geometry: $("evaluate").checked,
         evaluate_texture: $("evaluateTexture").checked,
+        delete_photos: $("poses").value === "colmap" && $("deletePhotos").checked,
       }),
     });
     // The socket often delivers newer updates for this job (running, first

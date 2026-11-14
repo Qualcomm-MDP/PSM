@@ -53,3 +53,14 @@ def get_reporter(state: Any = None) -> Reporter:
         if reporter is not None:
             return reporter
     return CONSOLE
+
+
+def notify(state: Any, message: str) -> None:
+    """A warning the user should see with the result, not only in the log (e.g. "no aerial
+    photo for this area"): logged, and kept in the run's "notices" (the web app shows them on
+    the finished job)."""
+    get_reporter(state).warning(message)
+    if state is not None:
+        state.set_metadata(
+            "notices", [*(state.get_metadata("notices", None) or []), message]
+        )

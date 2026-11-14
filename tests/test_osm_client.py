@@ -43,29 +43,9 @@ def make_client():
     return OSMClient(rounds=2, backoff_s=0, urls=("https://a", "https://b"))
 
 
-def test_falls_back_to_next_endpoint_on_overload(fake_post):
-    calls, responses = fake_post
-    responses += [FakeResponse(504), FakeResponse(200, {"elements": [1]})]
-
-    assert make_client().fetch(BBOX) == {"elements": [1]}
-    assert calls == ["https://a", "https://b"]
-
-
-def test_retries_another_round_after_all_endpoints_fail(fake_post):
-    calls, responses = fake_post
-    responses += [
-        requests.Timeout(),
-        FakeResponse(429),
-        FakeResponse(200, {"elements": []}),
-    ]
-
-    assert make_client().fetch(BBOX) == {"elements": []}
-    assert calls == ["https://a", "https://b", "https://a"]
-
-
-def test_falls_back_to_the_osm_api_after_exhausting_rounds(fake_post, monkeypatch):
-    _, responses = fake_post
-    responses += [FakeResponse(504)] * 4
+def test_fetch_uses_the_osm_api_not_overpass(fake_post, monkeypatch):
+    """Buildings come from the main OpenStreetMap API (the Overpass servers kept timing out)."""
+    calls, _ = fake_post
     asked = {}
 
     def elements(self, bbox, keep):
@@ -76,30 +56,50 @@ def test_falls_back_to_the_osm_api_after_exhausting_rounds(fake_post, monkeypatc
         return {"elements": [{"type": "way", "id": 1}]}
 
     monkeypatch.setattr(osm.OsmApiClient, "elements", elements)
-    with pytest.warns(UserWarning, match="OpenStreetMap API"):
-        assert make_client().fetch(BBOX) == {"elements": [{"type": "way", "id": 1}]}
+    assert make_client().fetch(BBOX) == {"elements": [{"type": "way", "id": 1}]}
     assert asked == {
         "bbox": (BBOX.min_lon, BBOX.min_lat, BBOX.max_lon, BBOX.max_lat),
         "keeps_buildings": True,
     }
+    assert calls == []  # no Overpass request
 
 
-def test_raises_when_the_osm_api_fails_too(fake_post, monkeypatch):
-    _, responses = fake_post
-    responses += [FakeResponse(504)] * 4
-
+def test_raises_when_the_osm_api_fails(monkeypatch):
     def down(self, bbox, keep):
         raise requests.HTTPError("HTTP 503")
 
     monkeypatch.setattr(osm.OsmApiClient, "elements", down)
-    with pytest.warns(UserWarning), pytest.raises(requests.HTTPError):
+    with pytest.raises(requests.HTTPError):
         make_client().fetch(BBOX)
 
 
-def test_does_not_retry_client_errors(fake_post):
+# The Overpass client (_post) is kept, though fetch no longer uses it
+
+
+def test_overpass_falls_back_to_next_endpoint_on_overload(fake_post):
+    calls, responses = fake_post
+    responses += [FakeResponse(504), FakeResponse(200, {"elements": [1]})]
+
+    assert make_client()._post("query") == {"elements": [1]}
+    assert calls == ["https://a", "https://b"]
+
+
+def test_overpass_retries_another_round_after_all_endpoints_fail(fake_post):
+    calls, responses = fake_post
+    responses += [
+        requests.Timeout(),
+        FakeResponse(429),
+        FakeResponse(200, {"elements": []}),
+    ]
+
+    assert make_client()._post("query") == {"elements": []}
+    assert calls == ["https://a", "https://b", "https://a"]
+
+
+def test_overpass_does_not_retry_client_errors(fake_post):
     calls, responses = fake_post
     responses += [FakeResponse(400)]
 
     with pytest.raises(requests.HTTPError):
-        make_client().fetch(BBOX)
+        make_client()._post("query")
     assert calls == ["https://a"]

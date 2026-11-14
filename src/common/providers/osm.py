@@ -42,27 +42,12 @@ class OSMClient:
 
         if features is None:
             features = [OSM_MAP_FEATURES.BUILDING]
-        query_parts = []
 
-        for feature in features:
-            query_parts.extend(self.build_feature_query(feature, bbox=bbox))
-
-        query = f"""
-        [out:json][timeout:25];
-        (
-            {"".join(query_parts)}
-        );
-        out body geom;
-        """
-        try:
-            return self._post(query)
-        except RuntimeError as exc:
-            keys = {k for f in features for k in self._get_tag_filters(f)}
-            self.reporter.warning(f"{exc}; fetching from the OpenStreetMap API instead")
-            return OsmApiClient().elements(
-                (bbox.min_lon, bbox.min_lat, bbox.max_lon, bbox.max_lat),
-                lambda tags: any(k in tags for k in keys),
-            )
+        keys = {k for f in features for k in self._get_tag_filters(f)}
+        return OsmApiClient().elements(
+            (bbox.min_lon, bbox.min_lat, bbox.max_lon, bbox.max_lat),
+            lambda tags: any(k in tags for k in keys),
+        )
 
     def _post(self, query: str) -> dict[str, Any]:
         """POST to each Overpass endpoint in turn, retrying with backoff.

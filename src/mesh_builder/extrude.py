@@ -12,15 +12,12 @@ EMBED_M = 0.1
 
 def build_mesh(value, state):
     bbox = state.require_metadata("bbox")
-    flagged = []
     data = extrude_buildings(
         value["osm"],
         bbox,
         reporter=get_reporter(state),
         terrain=state.get_metadata("terrain", None),
-        flagged=flagged,
     )
-    state.set_metadata("flagged_buildings", flagged)
     state.require_metadata("progress_monitor").next()
     return data
 
@@ -41,81 +38,86 @@ def ground_under(corners, terrain) -> tuple[float, float]:
     return float(ground.min()), float(ground.max())
 
 
+def run_extrusion(id, buildings, element, area_bbox, terrain):
+    corners = get_corners(element, area_bbox)
+
+    lines = get_lines(corners)
+
+    path = trimesh.path.path.Path2D(
+        entities=lines,
+        vertices=corners,
+    )
+
+    base, top = get_base_and_height(element)
+
+    polys = path.polygons_closed
+    if not polys[0]:
+        return
+
+    # Meshes here are z-down (texturing and export flip z). On terrain the
+    # roof sits `top` above the highest ground under the footprint and
+    # the walls reach down to the lowest, so nothing floats downhill. A
+    # building part with a base (min_height: e.g. a tower's upper section)
+    # starts that high above the ground instead.
+    bottom = base
+    height = top - base
+    if terrain is not None:
+        ground_low, ground_high = ground_under(corners, terrain)
+        bottom = ground_high + base if base > 0 else ground_low - EMBED_M
+        height = ground_high + top - bottom
+
+    height = -1 * height
+    if height == 0:
+        height += 1e-3
+
+    mesh = path.extrude(height=height)
+
+    if isinstance(mesh, list):
+        mesh = trimesh.util.concatenate(
+            [m.to_mesh() if hasattr(m, "to_mesh") else m for m in mesh]
+        )
+    else:
+        if hasattr(mesh, "to_mesh"):
+            mesh = mesh.to_mesh()
+
+    if bottom:
+        mesh.apply_translation([0.0, 0.0, -bottom])
+
+    if id in buildings:
+        buildings[id] = trimesh.util.concatenate([buildings[id], mesh])
+    else:
+        buildings[id] = mesh
+
+
 def extrude_buildings(
-    input_data, area_bbox, reporter: Reporter | None = None, terrain=None, flagged=None
+    input_data, area_bbox, reporter: Reporter | None = None, terrain=None
 ):
     reporter = reporter or get_reporter()
     buildings = {}
-    flagged = (
-        [] if flagged is None else flagged
-    )  # (osm, reason for buildings left out of mesh)
 
     for _, element in reporter.progress(
         enumerate(input_data["elements"]),
         desc="Generating Building Mesh(s)",
         total=len(input_data["elements"]),
     ):
-        osm = f"{element.get('type')} {element.get('id')}"
-        if "geometry" not in element:
-            flagged.append((osm, "no outline in data"))
-            continue
-        if len(element["geometry"]) < 3:
-            flagged.append((osm, "outline has too few points"))
-            continue
-
         id = element["id"]
-        corners = get_corners(element, area_bbox)
 
-        lines = get_lines(corners)
+        # some buildings like the Dude are not represented as a "way" type, they are represented as a "relation" type, so it was failing the first check
+        # I have split up the checks, but now need to handle the extrusion different since the types store things differently
+        if element["type"] == "way":
+            if "geometry" not in element:
+                continue
 
-        path = trimesh.path.path.Path2D(
-            entities=lines,
-            vertices=corners,
-        )
+        if element["type"] == "relation":
+            for member in element["members"]:
+                if "geometry" not in member:
+                    continue
 
-        base, top = get_base_and_height(element)
-
-        polys = path.polygons_closed
-        if len(polys) == 0 or not polys[0]:
-            flagged.append((osm, "outline is not a valid closed shape"))
-            continue
-
-        # Meshes here are z-down (texturing and export flip z). On terrain the
-        # roof sits `top` above the highest ground under the footprint and
-        # the walls reach down to the lowest, so nothing floats downhill. A
-        # building part with a base (min_height: e.g. a tower's upper section)
-        # starts that high above the ground instead.
-        bottom = base
-        height = top - base
-        if terrain is not None:
-            ground_low, ground_high = ground_under(corners, terrain)
-            bottom = ground_high + base if base > 0 else ground_low - EMBED_M
-            height = ground_high + top - bottom
-
-        height = -1 * height
-        if height == 0:
-            height += 1e-3
-
-        mesh = path.extrude(height=height)
-
-        if isinstance(mesh, list):
-            mesh = trimesh.util.concatenate(
-                [m.to_mesh() if hasattr(m, "to_mesh") else m for m in mesh]
-            )
-        else:
-            if hasattr(mesh, "to_mesh"):
-                mesh = mesh.to_mesh()
-
-        if bottom:
-            mesh.apply_translation([0.0, 0.0, -bottom])
-
-        buildings[id] = mesh
-
-    if flagged:
-        details = "\n".join(f"  {osm}: {reason}" for osm, reason in flagged)
-        reporter.warning(
-            f"{len(flagged)} building(s) were left out of the mesh:\n{details}"
-        )
+        if element["type"] == "way":
+            run_extrusion(id, buildings, element, area_bbox, terrain)
+        elif element["type"] == "relation":
+            for member in element["members"]:
+                run_extrusion(id, buildings, member, area_bbox, terrain)
 
     combined_mesh = trimesh.util.concatenate(
         [building for _, building in buildings.items()]

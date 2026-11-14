@@ -39,7 +39,6 @@ def extrude_buildings(
     area_bbox,
     reporter: Reporter | None = None,
     terrain=None,
-    flagged=None,
 )
 ```
 

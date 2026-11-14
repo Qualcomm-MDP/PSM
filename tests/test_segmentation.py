@@ -58,3 +58,22 @@ def test_auto_and_gpu_pick_the_best_device(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
     assert select_device("gpu").type == "cpu"
+
+
+def test_sky_only_masks_the_sky_and_leaves_the_obstructions():
+    from segmentation import SKY_NAMES
+
+    seg = np.zeros((40, 90), np.uint8)
+    seg[:, :30], seg[:, 30:60], seg[:, 60:] = (
+        17,
+        27,
+        55,
+    )  # building, sky, car (30 px bands)
+    mask = obstruction_mask(seg, VISTAS, classes=SKY_NAMES)
+    assert (mask[:, 30:60] == 255).all()  # sky
+    assert (
+        mask[20, 10] == 0 and mask[20, 80] == 0
+    )  # building, car (beyond the 7 px growth)
+    assert (
+        obstruction_mask(seg, VISTAS)[20, 80] == 255
+    )  # the car is an obstruction by default

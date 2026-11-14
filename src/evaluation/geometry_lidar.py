@@ -369,7 +369,8 @@ def build_from_glb(glb, out, bbox=None, osm_cache=True, osm=None, grid=None):
         cz = -V[:, 1].min()  # the terrain's lowest point is its datum
         z_datum = grid.z_datum
     else:
-        built = [p for el, p in outlines if el.get("type") == "way"]
+        # the mesh holds every building outline, relations' members too (mesh_builder.extrude)
+        built = [p for _, p in outlines]
         if not built:
             sys.exit("[input] no OSM buildings for this box")
         x0, y0, x1, y1 = unary_union(built).bounds

@@ -49,8 +49,10 @@ def test_no_token_anywhere(tmp_path):
         "poses": "colmap",
         "remove_obstructions": True,
         "fill_obstructions": True,
+        "sky_only": False,
         "seg_model": "large",
         "device": "auto",
+        "delete_photos": False,
     }
 
 
@@ -165,14 +167,17 @@ def test_defaults_are_saved_and_validated(tmp_path):
     client = make_client(tmp_path)
 
     saved = client.put(
-        "/api/settings", json={"defaults": {"seg_model": "tiny", "device": "cpu"}}
+        "/api/settings",
+        json={"defaults": {"seg_model": "tiny", "device": "cpu", "sky_only": True}},
     ).json()
     assert saved["defaults"] == {
         "poses": "colmap",
         "remove_obstructions": True,
         "fill_obstructions": True,
+        "sky_only": True,
         "seg_model": "tiny",
         "device": "cpu",
+        "delete_photos": False,
     }
     assert saved["mapillary"]["set"] is False  # token untouched
 
