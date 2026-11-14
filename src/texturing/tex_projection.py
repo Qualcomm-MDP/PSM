@@ -406,7 +406,6 @@ def _apply_textures(
 
     patch_records: list[dict]
     if texture_mode == "blend":
-        print("Running the blending")
         patch_records, stats = bake_walls(
             verts_proj, faces, face_normals, cam_data, skip, reporter, UNTEXTURED_GREY
         )
@@ -415,7 +414,6 @@ def _apply_textures(
             f"the photos ({100 * stats.get('coverage', 0):.0f}% of their texels seen)"
         )
     else:
-        print("Running the raycasting")
         best_hit: dict[int, tuple] = {}
         for ci, cd in enumerate(reporter.progress(cam_data, desc="Visibility")):
             Cw, R, K = cd["Cw"], cd["R"], cd["K"]

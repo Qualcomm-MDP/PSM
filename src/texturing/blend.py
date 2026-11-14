@@ -180,6 +180,8 @@ def bake_walls(
                     (v * mask.shape[0] / img.shape[0]).astype(int), 0, mask.shape[0] - 1
                 )
                 clear = 1.0 - mask[mv, mu] / 255.0
+            # median_dist = np.median(rn)
+            # w = 1 - (0.35 * clear) - (0.25 * cos) - (0.40 * (1 - np.exp(-rn / median_dist)))            
             w = ((cos * clear / (1.0 + rn / 15.0)) ** SHARPEN * ok).astype(np.float32)
             if not w.any():
                 continue

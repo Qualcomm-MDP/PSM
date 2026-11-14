@@ -1,6 +1,6 @@
 import numpy as np
 
-def clip_confidence_score(confidence_raw, threshold=0.5, sharpen=1):
+def clip_confidence_score(confidence_raw, threshold=0.4, sharpen=1):
     confidence_alpha = confidence_raw * 255
     confidence_8bit = np.where(
         confidence_alpha > threshold ** sharpen,
