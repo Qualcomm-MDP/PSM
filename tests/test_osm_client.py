@@ -43,28 +43,51 @@ def make_client():
     return OSMClient(rounds=2, backoff_s=0, urls=("https://a", "https://b"))
 
 
-def test_fetch_uses_the_osm_api_not_overpass(fake_post, monkeypatch):
-    """Buildings come from the main OpenStreetMap API (the Overpass servers kept timing out)."""
-    calls, _ = fake_post
-    asked = {}
+@pytest.fixture(autouse=True)
+def overpass_up(monkeypatch):
+    """Every test starts with Overpass not marked as down."""
+    monkeypatch.setattr(OSMClient, "_overpass_down_until", 0.0)
+
+
+def _api(monkeypatch):
+    asked = []
 
     def elements(self, bbox, keep):
-        asked["bbox"] = bbox
-        asked["keeps_buildings"] = keep({"building": "yes"}) and not keep(
-            {"highway": "x"}
-        )
-        return {"elements": [{"type": "way", "id": 1}]}
+        asked.append(bbox)
+        return {"elements": ["from the api"]}
 
     monkeypatch.setattr(osm.OsmApiClient, "elements", elements)
-    assert make_client().fetch(BBOX) == {"elements": [{"type": "way", "id": 1}]}
-    assert asked == {
-        "bbox": (BBOX.min_lon, BBOX.min_lat, BBOX.max_lon, BBOX.max_lat),
-        "keeps_buildings": True,
-    }
-    assert calls == []  # no Overpass request
+    return asked
 
 
-def test_raises_when_the_osm_api_fails(monkeypatch):
+def test_fetch_asks_overpass_first(fake_post, monkeypatch):
+    calls, responses = fake_post
+    responses += [FakeResponse(200, {"elements": ["from overpass"]})]
+    asked = _api(monkeypatch)
+
+    assert make_client().fetch(BBOX) == {"elements": ["from overpass"]}
+    assert calls == ["https://a"] and asked == []
+
+
+def test_fetch_falls_back_to_the_osm_api_and_skips_overpass_while_down(
+    fake_post, monkeypatch
+):
+    calls, responses = fake_post
+    responses += [FakeResponse(504)] * 4  # 2 servers x 2 rounds
+    asked = _api(monkeypatch)
+
+    assert make_client().fetch(BBOX) == {"elements": ["from the api"]}
+    assert asked == [(BBOX.min_lon, BBOX.min_lat, BBOX.max_lon, BBOX.max_lat)]
+    tried = len(calls)
+    # the next job goes straight to the API
+    assert make_client().fetch(BBOX) == {"elements": ["from the api"]}
+    assert len(calls) == tried and len(asked) == 2
+
+
+def test_raises_when_overpass_and_the_osm_api_both_fail(fake_post, monkeypatch):
+    _, responses = fake_post
+    responses += [FakeResponse(504)] * 4
+
     def down(self, bbox, keep):
         raise requests.HTTPError("HTTP 503")
 
@@ -73,7 +96,7 @@ def test_raises_when_the_osm_api_fails(monkeypatch):
         make_client().fetch(BBOX)
 
 
-# The Overpass client (_post) is kept, though fetch no longer uses it
+# Overpass: each server in turn, for a few rounds
 
 
 def test_overpass_falls_back_to_next_endpoint_on_overload(fake_post):

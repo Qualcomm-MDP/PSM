@@ -457,8 +457,13 @@ def _summarize(state: Any, job_dir: Path) -> dict[str, Any]:
         result["warnings"] = list(notices)
     fetched = state.stage_outputs.get("fetch") or {}
     elements = (fetched.get("osm") or {}).get("elements", [])
-    result["buildings"] = sum(1 for e in elements if "geometry" in e)
+    # ways with an outline, and relations (multipolygons) with members
+    result["buildings"] = sum(1 for e in elements if "geometry" in e or "members" in e)
     result["photos"] = len(fetched.get("mapillary") or {})
+    result["flagged"] = [
+        {"osm": osm, "reason": reason}
+        for osm, reason in state.get_metadata("flagged_buildings", None) or []
+    ]
     aligned = state.get_metadata("pose_alignment", None)
     if aligned and aligned.get("roi_folder"):
         result["alignment_folder"] = aligned["roi_folder"]

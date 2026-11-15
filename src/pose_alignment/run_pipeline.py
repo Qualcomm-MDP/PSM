@@ -7,7 +7,7 @@ Stages, in order (each is also its own script):
   segmentation  segmentation/street_masks.py   Mask2Former building/road masks -> data/masks/
   calibrate     calibrate.py            GeoCalib focal, distortion and per-frame gravity -> data/calibration/
                                         (--calibration mapillary: Mapillary's -> data/calibration_mapillary/)
-  reconstruct   reconstruct.py          COLMAP SIFT (or ALIKED + nearest-neighbour / LightGlue) matching,
+  reconstruct   reconstruct.py          ALIKED + mutual-nearest-neighbour matching,
                                         COLMAP global mapper with gravity priors, per leg; a focal that
                                         shrank >5% below GeoCalib's solved again held -> data/reconstruction/
   align         align.py                building points fitted to the OSM footprints: scale held at the
@@ -564,7 +564,7 @@ def main():
         if paths.legs_json.exists():
             names = {
                 "prepare": "prepare frames and masks",
-                "features_matching": "COLMAP SIFT or feature import, and match check (CPU)",
+                "features_matching": "ALIKED feature import and matching, and match check",
                 "mapper": "COLMAP mapper",
                 "mapper_fallback": "incremental-mapper fallback",
                 "retriangulation": "re-triangulation",

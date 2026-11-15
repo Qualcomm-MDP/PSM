@@ -162,10 +162,10 @@ GPS = {"source": "auto"}
 # cameras (no rig check). Measured GPS for the whole ROI: roi_11 reliable 266 -> 478 (ALIKED + NN), but
 # another ROI 81 -> 60, so per leg only where the check fails; with auto only roi_11's 5 rig legs switched
 GPS_CHECK = {"length_tol": 0.15, "rig_tol": 0.10, "min_overlap_s": 5.0}
-GPS_LEG = {}  # leg id -> {"source": "computed" | "measured", "reasons": [...]} (--gps auto)
-GPS_MEASURED_FOLDERS = (
-    set()
-)  # sequences of the legs --gps auto placed by measured GPS (overview's x marks)
+# leg id -> {"source": "computed" | "measured", "reasons": [...]} (--gps auto)
+GPS_LEG: dict[str, dict] = {}
+# sequences of the legs --gps auto placed by measured GPS (overview's x marks)
+GPS_MEASURED_FOLDERS: set[str] = set()
 HEADING = {"prior_deg": None, "mode": "facades"}  # --heading-prior, --heading
 FACADE_HDG = {
     "range_deg": 20.0,
