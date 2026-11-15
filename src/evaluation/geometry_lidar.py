@@ -306,6 +306,7 @@ def build_from_glb(glb, out, bbox=None, osm_cache=True, osm=None, grid=None):
     Writes buildings_footprints_utm.geojson, terrain_grid.npz and osm_buildings.json to
     `out` (read back by --from-dir) and returns (feats, utm_crs, terrain_fn, embed_m).
     """
+    from shapely.geometry import Polygon
     from shapely.ops import unary_union
 
     from common.constants import BoundingBox
@@ -317,7 +318,7 @@ def build_from_glb(glb, out, bbox=None, osm_cache=True, osm=None, grid=None):
     )
     from common.providers import OSM_MAP_FEATURES, OSMClient
     from mesh_builder.extrude import EMBED_M as embed_m
-    from mesh_builder.extrude import ground_under
+    from mesh_builder.extrude import closed_ring, ground_under
 
     glb = Path(glb)
     job = glb.parent / "job.json"
@@ -369,7 +370,17 @@ def build_from_glb(glb, out, bbox=None, osm_cache=True, osm=None, grid=None):
         cz = -V[:, 1].min()  # the terrain's lowest point is its datum
         z_datum = grid.z_datum
     else:
-        built = [p for el, p in outlines if el.get("type") == "way"]
+        # the outlines the mesh holds (mesh_builder.extrude): the ways, and the relations' outer
+        # member ways that are whole rings and not buildings of their own
+        built = [p for el, p in outlines if el.get("type") == "way"] + [
+            Polygon(to_xy(m["geometry"]))
+            for el in elements
+            if el.get("type") == "relation"
+            for m in el.get("members", [])
+            if m.get("role", "outer") != "inner"
+            and m.get("ref") not in way_ids
+            and closed_ring(m)
+        ]
         if not built:
             sys.exit("[input] no OSM buildings for this box")
         x0, y0, x1, y1 = unary_union(built).bounds

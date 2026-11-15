@@ -25,7 +25,7 @@ MAX_DIST_M = 100.0
 def leg_points(folder_dir):
     """(ENU xyz (N, 3), with z the height above the road; rgb (N, 3) uint8; ENU origin
     (lon, lat)) of one aligned leg camera."""
-    from .align import point_pieces  # (align imports matplotlib)
+    from .align import observed_share, point_pieces  # (align imports matplotlib)
 
     tf = json.loads((folder_dir / "transform.json").read_text())
     origin, basis = np.array(tf["origin"]), np.array(tf["basis"])
@@ -40,6 +40,12 @@ def leg_points(folder_dir):
     names, C, _ = load_cameras(tf["model"])
     xyz, rgb, track = load_points(tf["model"])
     piece_of = {n: k for k, pc in enumerate(pieces) for n in (pc["images"] or names)}
+    shown = np.ones(len(xyz), bool)
+    if any(n not in piece_of for n in names):
+        # a folded leg (align.py fold_keep): only its kept cameras and the points they mostly see
+        shown = observed_share(tf["model"], set(piece_of)) >= 0.5
+        kept = [i for i, n in enumerate(names) if n in piece_of]
+        names, C = [names[i] for i in kept], C[kept]
     idx = (
         point_pieces(tf["model"], names, piece_of)
         if len(pieces) > 1
@@ -64,7 +70,13 @@ def leg_points(folder_dir):
     from scipy.spatial import cKDTree
 
     near = cKDTree(cams[:, :2]).query(out[:, :2])[0] <= MAX_DIST_M
-    keep = (track >= MIN_TRACK) & (out[:, 2] > -3.0) & (out[:, 2] < MAX_HEIGHT_M) & near
+    keep = (
+        shown
+        & (track >= MIN_TRACK)
+        & (out[:, 2] > -3.0)
+        & (out[:, 2] < MAX_HEIGHT_M)
+        & near
+    )
     colours = (np.clip(rgb[keep], 0, 1) * 255).astype(np.uint8)
     return out[keep], colours, tf["enu_origin_lon_lat"]
 

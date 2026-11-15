@@ -76,7 +76,8 @@ def main():
         "--no-seg",
         action="store_true",
         default=False,
-        help="Skip obstruction removal in texturing (no segmentation, no inpainting)",
+        help="Skip obstruction removal in texturing (no segmentation, no inpainting, the sky "
+        "not masked)",
     )
     parser.add_argument(
         "--texture",
@@ -86,11 +87,17 @@ def main():
         "by view angle, distance and obstructions; best: each face from its single best photo",
     )
     parser.add_argument(
+        "--sky-only",
+        action="store_true",
+        help="Mask only the sky in the facade photos (never painted over), leaving cars, poles "
+        "and people as taken: no sky projected onto walls",
+    )
+    parser.add_argument(
         "--no-fill",
         action="store_true",
         default=False,
         help="Segment the obstructions (cars, people, poles, ...) but do not paint them over "
-        "(LaMa): each face takes the photo where they hide it least",
+        "(LaMa): each face takes the photo where they hide it least (the sky is masked either way)",
     )
     parser.add_argument(
         "--bbox",
@@ -200,6 +207,7 @@ def main():
             "progress_monitor": pipeline_progress,
             "remove_obstructions": not args.no_seg,
             "fill_obstructions": not args.no_fill,
+            "sky_only": args.sky_only,
             "texture_mode": args.texture,
             "output_path": args.output,
             "ask_output_path": ask_save_path,
@@ -219,6 +227,7 @@ def main():
                 if args.evaluate_texture and args.output
                 else None
             ),
+            "alignment_options": {},
         },
         profiler=profiler,
         skip_stages=skip_stages,

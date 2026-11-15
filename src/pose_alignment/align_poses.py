@@ -64,15 +64,30 @@ def _use_computed(mapillary, reporter=None):
     )
 
 
+def alignment_args(options):
+    """run_pipeline.py options for a job's alignment. None: the method is fixed (ALIKED +
+    nearest-neighbour matching, the focal rule, the scale from the GPS placement, walls matched by
+    direction plus the other building points by nearest wall, the heading from the facades, and
+    the GPS per leg, measured where Mapillary's computed track looks broken), run_pipeline.py's
+    defaults. Options older jobs recorded (features, alignment, focal_rule) are ignored."""
+    return []
+
+
 def _run_alignment(
-    bbox, roi_dir=None, images=None, selection=None, reporter=None, osm=None
+    bbox,
+    roi_dir=None,
+    images=None,
+    selection=None,
+    reporter=None,
+    osm=None,
+    options=None,
 ):
     """Run the alignment pipeline (or finish an earlier run in roi_dir); returns its RoiPaths.
     selection: the captures the fetch stage chose (ingest.py), which are reconstructed;
     without it they are chosen here from images, the fetch stage's Mapillary records (or
     from a query). The photos are downloaded at full resolution into
     the ROI's image store, for texturing to reuse. Every stage from the download on runs in
-    its own process (run_pipeline.py), as when the pipeline runs on its own: LightGlue,
+    its own process (run_pipeline.py), as when the pipeline runs on its own: GeoCalib,
     PyTorch, OpenCV's threaded image work and COLMAP each bring their own runtimes, which can
     clash in this process (cutting 360 frames here crashed it)."""
     from .geo_common import module_command, next_roi_dir
@@ -84,6 +99,8 @@ def _run_alignment(
     if roi_dir is None:
         paths = RoiPaths(next_roi_dir())
         paths.data.mkdir(parents=True)
+        # named in the log, so a job can find (and delete) its folder even if the alignment fails
+        reporter.info(f"  alignment folder: {paths.root}")
         if osm is not None:
             # the fetch stage's buildings (over the alignment's reach, ingest.py), saved as the
             # align stage's building file so it does not ask Overpass again
@@ -111,6 +128,7 @@ def _run_alignment(
         if not done["mapillary"]:
             raise RuntimeError(f"{paths.root} has no finished Mapillary download")
         args = ["--roi-dir", paths.root]
+    args += alignment_args(options)
     if not done["align"]:
         cmd, env = module_command("run_pipeline.py", *args)
         colmap_bin = os.environ.get("COLMAP_BIN")
@@ -249,6 +267,12 @@ def _apply_alignment(
             "roll": round(float(roll), 2),
             "camera_height_m": cam["height_m"],
             "pose_source": "colmap",
+            # the reconstruction's lens (COLMAP model and parameters at camera_width px):
+            # texturing undistorts the photo with it (a fisheye projected as a pinhole puts
+            # a point 50 deg off-axis ~37% too far from the centre)
+            "camera_model": intr.get("model"),
+            "camera_params": intr.get("params"),
+            "camera_width": intr.get("width"),
         }
         info["camera_height_m"] = round(cam["height_m"], 3)
 
@@ -371,6 +395,7 @@ def align_poses(value, state):
                 state.require_metadata("provider_data").get("mapillary_selection"),
                 reporter,
                 state.require_metadata("provider_data").get("osm_alignment"),
+                state.get_metadata("alignment_options", None),
             )
             # texturing reads the photos the alignment downloaded, and the class maps its
             # segmentation made, instead of downloading and segmenting them again

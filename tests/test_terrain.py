@@ -124,6 +124,54 @@ def test_terrain_stage_falls_back_to_flat_ground_on_failure(monkeypatch):
     with pytest.warns(UserWarning, match="flat ground"):
         assert terrain_stage("fetched", state) == "fetched"
     assert state.get_metadata("terrain", None) is None
+    # the user is told, with the result (the web app shows result.warnings)
+    (notice,) = state.get_metadata("notices", [])
+    assert (
+        notice.startswith("No terrain for this area") and "tile server down" in notice
+    )
+
+
+def test_naip_failure_is_a_notice_for_the_user(monkeypatch):
+    from naip import naip as naip_module
+
+    def fail(*args, **kwargs):
+        raise RuntimeError(
+            "502 Server Error: Bad Gateway for url: https://imagery.example/exportImage?bbox=1,2,3,4"
+        )
+
+    monkeypatch.setattr(naip_module, "build_ortho", fail)
+    state = _state(bbox=BBOX, use_naip=True, terrain=object())
+
+    with pytest.warns(UserWarning, match="No aerial photo"):
+        assert naip_module.naip_stage("mesh", state) == "mesh"
+    (notice,) = state.get_metadata("notices", [])
+    assert "502 Server Error: Bad Gateway" in notice and "for url" not in notice
+
+
+def test_downloads_are_retried_after_a_server_error(monkeypatch):
+    import requests
+
+    from common import http_retry
+
+    class _Resp:
+        def __init__(self, code):
+            self.status_code = code
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.HTTPError(f"{self.status_code} error")
+
+    answers = [_Resp(502), _Resp(503), _Resp(200)]
+
+    class _Session:
+        def get(self, url, **kwargs):
+            return answers.pop(0)
+
+    monkeypatch.setattr(http_retry.time, "sleep", lambda s: None)
+    assert http_retry.get_with_retries(_Session(), "https://x").status_code == 200
+    answers[:] = [_Resp(502)] * 4
+    with pytest.raises(requests.HTTPError):
+        http_retry.get_with_retries(_Session(), "https://x")
 
 
 def _export(tmp_path, terrain):

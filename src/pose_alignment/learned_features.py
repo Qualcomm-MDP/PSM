@@ -1,6 +1,5 @@
-"""Feature matching for the reconstruct stage: ALIKED keypoints matched with LightGlue, or with
-plain mutual nearest-neighbour matching of the descriptors for frames close together (--matcher nn;
-nn_features.py is the same with nn as the default).
+"""Feature matching for the reconstruct stage: ALIKED keypoints matched by mutual nearest neighbour
+of their descriptors.
 
 Writes them in the formats of COLMAP's documented route for custom features, so COLMAP's own
 geometric verification, mapper and everything after stay unchanged (reconstruct.py runs
@@ -15,22 +14,21 @@ Pairs are sequential like COLMAP's sequential matcher: each frame with its next 
 images, reconstruct.py). Keypoints on black pixels of the COLMAP feature masks
 (<mask dir>/<image name>.png: burned-in overlays, sky, vehicles, people) are dropped.
 
---jobs jobs.json runs many such jobs (a list of {images, out, masks, pairs, overlap, matcher}) in one
+--jobs jobs.json runs many such jobs (a list of {images, out, masks, pairs, overlap}) in one
 process: the networks are loaded once, and each image file is read and its keypoints extracted
 once however many jobs use it (reconstruct.py's leg work folders hard-link the same frames, and
 legs overlap), instead of one process per leg camera.
 
 Nearest-neighbour matching: a pair matches when each keypoint is the other's closest descriptor and
-the closest is clearly closer than the second closest (ratio test). Against LightGlue (roi_2, 5, 7,
-11): ~15x faster, equal results on ordinary streets; worse where neighbouring frames look very
-different (frames ~9 m apart on roi_5's long leg, a parked truck on roi_11).
+the closest is clearly closer than the second closest (ratio test). Against LightGlue on 8 ROIs, with
+the same frame pairs: about half the time and nearly the same wall fits after alignment.
 
 Runs as its own process (reconstruct.py calls it): PyTorch and pycolmap each ship an OpenMP
-runtime and crash when loaded together, and LightGlue would import pycolmap for its SIFT backend,
-so pycolmap is kept out of this process.
+runtime and crash when loaded together, and the lightglue package (which provides ALIKED) would
+import pycolmap for its SIFT backend, so pycolmap is kept out of this process.
 
 Usage:
-  python -m pose_alignment.learned_features --images <dir> --out <dir> [--overlap 10] [--masks <dir>] [--matcher nn]
+  python -m pose_alignment.learned_features --images <dir> --out <dir> [--overlap 10] [--masks <dir>]
   python -m pose_alignment.learned_features --jobs jobs.json
 """
 
@@ -44,13 +42,13 @@ from pathlib import Path
 os.environ.setdefault(
     "PYTORCH_ENABLE_MPS_FALLBACK", "1"
 )  # ops MPS lacks run on the CPU
-# LightGlue's optional SIFT backend; see the docstring
+# the lightglue package's optional SIFT backend; see the docstring
 sys.modules.setdefault("pycolmap", None)  # type: ignore[arg-type]
 
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
-from lightglue import ALIKED, LightGlue  # noqa: E402
+from lightglue import ALIKED  # noqa: E402
 from lightglue.utils import load_image, rbd  # noqa: E402
 
 MAX_KEYPOINTS = 2048
@@ -59,7 +57,7 @@ RATIO = 0.9  # nearest-neighbour matching: closest / second-closest descriptor d
 
 
 class NearestNeighbour(torch.nn.Module):
-    """Stands in for LightGlue: same call and output layout ({"matches": [K x 2]})."""
+    """Mutual nearest neighbour with a ratio test; output {"matches": [K x 2]}, as LightGlue's was."""
 
     def forward(self, data):
         d0, d1 = data["image0"]["descriptors"][0], data["image1"]["descriptors"][0]
@@ -78,33 +76,26 @@ class NearestNeighbour(torch.nn.Module):
 
 
 class Matcher:
-    """ALIKED extraction, cached per image file, and the matchers, loaded once."""
+    """ALIKED extraction, cached per image file, and the matcher, loaded once."""
 
     def __init__(self):
+        # FEATURES_DEVICE=cpu|mps|cuda overrides
         self.device = torch.device(
-            "cuda"
-            if torch.cuda.is_available()
-            else "mps"
-            if torch.backends.mps.is_available()
-            else "cpu"
+            os.environ.get("FEATURES_DEVICE")
+            or (
+                "cuda"
+                if torch.cuda.is_available()
+                else "mps"
+                if torch.backends.mps.is_available()
+                else "cpu"
+            )
         )
         self.extractor = ALIKED(max_num_keypoints=MAX_KEYPOINTS).eval().to(self.device)
         self.matchers = {"nn": NearestNeighbour()}
         self.cache, self.extracted, self.reused, self.extract_s = {}, 0, 0, 0.0
 
-    def matcher(self, name):
-        if name not in self.matchers:
-            # LightGlue's adaptive pruning saves time on the CPU but costs it on MPS (0.29 vs 0.11 s per
-            # pair on an M1 Pro, same matches), so it is switched off there
-            pruning = (
-                {}
-                if self.device.type == "cpu"
-                else {"depth_confidence": -1, "width_confidence": -1}
-            )
-            self.matchers[name] = (
-                LightGlue(features="aliked", **pruning).eval().to(self.device)
-            )
-        return self.matchers[name]
+    def matcher(self, name="nn"):
+        return self.matchers["nn"]
 
     def features(self, path):
         """ALIKED features of an image file (CPU tensors), extracted once per file: hard links of one
@@ -130,7 +121,7 @@ class Matcher:
         overlap=10,
         mask_dir=None,
         pairs_file=None,
-        matcher="lightglue",
+        matcher="nn",
     ):
         """Keypoints for every frame in `images` (masked), matches between the pairs."""
         names = sorted(
@@ -220,7 +211,7 @@ class Matcher:
         return stats
 
 
-def main(default_matcher="lightglue"):
+def main(default_matcher="nn"):
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -243,12 +234,12 @@ def main(default_matcher="lightglue"):
         help="Match these pairs ('name1 name2' per line) instead of sequential ones",
     )
     parser.add_argument(
-        "--matcher", choices=["lightglue", "nn"], default=default_matcher
+        "--matcher", choices=["nn"], default="nn", help=argparse.SUPPRESS
     )
     parser.add_argument(
         "--jobs",
         type=Path,
-        help="Run a list of jobs ({images, out, masks, pairs, overlap, matcher}) in one process",
+        help="Run a list of jobs ({images, out, masks, pairs, overlap}) in one process",
     )
     args = parser.parse_args()
     t0 = time.time()

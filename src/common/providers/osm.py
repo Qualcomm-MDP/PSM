@@ -18,7 +18,13 @@ class OSM_MAP_FEATURES(Enum):
     NATURE = "nature"
 
 
+# After every Overpass server has failed, fetches go straight to the OSM API for this long (s).
+OVERPASS_DOWN_S = 600.0
+
+
 class OSMClient:
+    _overpass_down_until = 0.0  # shared by every client in the process
+
     def __init__(
         self,
         timeout: int = 30,
@@ -42,11 +48,19 @@ class OSMClient:
 
         if features is None:
             features = [OSM_MAP_FEATURES.BUILDING]
-        query_parts = []
 
+        keys = {k for f in features for k in self._get_tag_filters(f)}
+        api_box = (bbox.min_lon, bbox.min_lat, bbox.max_lon, bbox.max_lat)
+        # Overpass is the data service; the main OSM API is meant for editing, so it is only the
+        # fallback (osm_api.py). After Overpass has failed, it is skipped for OVERPASS_DOWN_S, so
+        # an outage costs one round of attempts, not one per job.
+        if time.time() < OSMClient._overpass_down_until:
+            return OsmApiClient().elements(
+                api_box, lambda tags: any(k in tags for k in keys)
+            )
+        query_parts = []
         for feature in features:
             query_parts.extend(self.build_feature_query(feature, bbox=bbox))
-
         query = f"""
         [out:json][timeout:25];
         (
@@ -57,11 +71,10 @@ class OSMClient:
         try:
             return self._post(query)
         except RuntimeError as exc:
-            keys = {k for f in features for k in self._get_tag_filters(f)}
+            OSMClient._overpass_down_until = time.time() + OVERPASS_DOWN_S
             self.reporter.warning(f"{exc}; fetching from the OpenStreetMap API instead")
             return OsmApiClient().elements(
-                (bbox.min_lon, bbox.min_lat, bbox.max_lon, bbox.max_lat),
-                lambda tags: any(k in tags for k in keys),
+                api_box, lambda tags: any(k in tags for k in keys)
             )
 
     def _post(self, query: str) -> dict[str, Any]:

@@ -326,7 +326,7 @@ def rank_runs(
     runs, min_images=20, max_spacing=10.0, view=None, view_tol=35.0, pano="auto"
 ):
     """Enough frames first, then frames dense enough for COLMAP (median spacing <=
-    max_spacing: 10 m, as the reconstruct stage matches widely spaced frames with LightGlue: roi_4
+    max_spacing: 10 m, measured when the reconstruct stage matched with LightGlue: roi_4
     at 8.6 m and roi_5 at 9.9 m came out reliable; roi_9 at 10.3 m, a forward camera with
     buildings far back, did not), then coverage of the line in 25% steps, then spacing in
     1 m steps (2.1 vs 2.2 m is no real difference), then the most frames. Among runs covering

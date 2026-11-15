@@ -658,6 +658,32 @@ test-full = ["adlfs", "aiohttp (!=4.0.0a0,!=4.0.0a1)", "backports-zstd ; python_
 tqdm = ["tqdm"]
 
 [[package]]
+name = "geocalib"
+version = "1.0"
+description = "GeoCalib Inference Package"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = []
+develop = false
+
+[package.dependencies]
+kornia = "*"
+matplotlib = "*"
+opencv-python = "*"
+torch = "*"
+torchvision = "*"
+
+[package.extras]
+dev = ["black (==23.9.1)", "flake8", "isort (==5.12.0)"]
+
+[package.source]
+type = "git"
+url = "https://github.com/cvg/GeoCalib"
+reference = "HEAD"
+resolved_reference = "1dedb29f94fc11b896c5f572005978aeebccd67f"
+
+[[package]]
 name = "geojson"
 version = "3.2.0"
 description = "Python bindings and utilities for GeoJSON"
@@ -3648,4 +3674,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.15,!=3.14.1"
-content-hash = "aabb27794d1bb637b9ca4e5b6e780ccd7445c2546dca2c570f29b1ad9628fd76"
+content-hash = "c7b4a23dbff1408243a9eab5c44ad7e19f8830d6efa79df14b3b027046e19edc"

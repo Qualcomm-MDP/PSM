@@ -96,8 +96,21 @@ def test_ground_has_the_roof_painted_out(mesh):
     assert np.all(ground[roof].min(axis=1) > 200)  # near white, not blue
 
 
+def _textured_mesh(out):
+    """The photo-textured mesh of apply_textures' result (a scene since the confidence overlay)."""
+    if not hasattr(out, "geometry"):
+        return out
+    return next(
+        g
+        for g in out.geometry.values()
+        if getattr(getattr(g.visual, "material", None), "baseColorTexture", None)
+        is not None
+    )
+
+
 def _texel(textured, face):
     """Texture colour at the centre of a face of a textured mesh."""
+    textured = _textured_mesh(textured)
     uv = textured.visual.uv[textured.faces[face]].mean(axis=0)
     img = np.asarray(textured.visual.material.baseColorTexture)
     h, w = img.shape[:2]
@@ -159,9 +172,10 @@ def test_naip_stage_continues_without_photos_on_failure(
     monkeypatch.setattr(naip_module, "build_ortho", fail)
     state = _state(bbox=BBOX, use_naip=True, terrain=flat_terrain)
 
-    with pytest.warns(UserWarning, match="without aerial photos"):
+    with pytest.warns(UserWarning, match="No aerial photo for this area"):
         assert naip_stage(mesh, state) is mesh
     assert state.get_metadata("naip", None) is None
+    assert "image server down" in state.get_metadata("notices", [])[0]
 
 
 def test_export_drapes_the_photo_on_the_ground(tmp_path, mesh, flat_terrain):
