@@ -1249,15 +1249,6 @@ function jobFactsHtml(job) {
   if (job.result?.photos != null) rows.push(["Photos", `<span class="mono">${job.result.photos}</span>`]);
   if (job.result?.aligned_photos != null)
     rows.push(["Aligned photos", `<span class="mono">${job.result.aligned_photos}</span>`]);
-  const flagged = job.result?.flagged || [];
-  if (flagged.length) {
-    const items = flagged.map((f) => {
-      const [type, id] = f.osm.split(" ");
-      const url = `https://www.openstreetmap.org/${esc(type)}/${esc(id)}`;
-      return `<div><a href="${url}" target="_blank" rel="noopener">${esc(f.osm)}</a>: ${esc(f.reason)}</div>`;
-    });
-    rows.push([`Flagged (${flagged.length})`, items.join("")]);
-  }
   if (o.delete_photos)
     rows.push([
       "Photos after the run",
