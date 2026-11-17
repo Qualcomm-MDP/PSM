@@ -638,7 +638,23 @@ def read_ept(url, aoi_utm, utm_crs, cache_dir, workers=8):
     )
 
 
+def z_to_metres(crs):
+    """Metres per unit of a LAS/LAZ file's z: its vertical CRS's unit, else its horizontal
+    one's (State Plane tiles in feet usually have z in feet too), else 1. Without this,
+    heights from a file in feet come out 3.28x too tall."""
+    if crs is None:
+        return 1.0
+    for sub in reversed(crs.sub_crs_list if crs.is_compound else [crs]):
+        if sub.axis_info:  # the vertical part comes last in a compound CRS
+            axis = sub.axis_info[-1] if sub.is_vertical else sub.axis_info[0]
+            factor = axis.unit_conversion_factor
+            if factor and math.isfinite(factor):
+                return float(factor)
+    return 1.0
+
+
 def read_laz_files(paths, aoi_utm, utm_crs, laz_crs=None):
+    """Points of local LAS/LAZ tiles in the AOI: x, y in UTM, z in metres."""
     laspy = _laspy()
     parts = []
     for p in paths:
@@ -649,6 +665,7 @@ def read_laz_files(paths, aoi_utm, utm_crs, laz_crs=None):
                     f"[lidar] {p} has no CRS in its header; pass --laz-crs EPSG:xxxx"
                 )
             hcrs = crs.sub_crs_list[0] if crs.is_compound else crs
+            zf = z_to_metres(crs)
             to_f = Transformer.from_crs(utm_crs, hcrs, always_xy=True)
             ax0, ay0, ax1, ay1 = aoi_utm
             fx, fy = to_f.transform([ax0, ax1, ax1, ax0], [ay0, ay0, ay1, ay1])
@@ -657,11 +674,12 @@ def read_laz_files(paths, aoi_utm, utm_crs, laz_crs=None):
             for chunk in fh.chunk_iterator(5_000_000):
                 x, y, z, c = _point_arrays(chunk, min(fx), min(fy), max(fx), max(fy))
                 ux, uy = back.transform(x, y)
-                parts.append((np.asarray(ux), np.asarray(uy), z, c))
+                parts.append((np.asarray(ux), np.asarray(uy), z * zf, c))
                 n += len(x)
             unit = hcrs.axis_info[0].unit_name if hcrs.axis_info else "?"
             _log(
                 f"[lidar] {Path(p).name}: {n:,} points in AOI ({hcrs.to_string()}, {unit})"
+                + (f"; z x{zf:.6f} to metres" if abs(zf - 1.0) > 1e-9 else "")
             )
     if not parts:
         raise Unavailable("[lidar] no points read")
@@ -671,8 +689,9 @@ def read_laz_files(paths, aoi_utm, utm_crs, laz_crs=None):
 
 def load_lidar(args, aoi_utm, utm_crs, out):
     """Points (UTM x, y, z, class) for the AOI, cached as one .npz per source + AOI."""
+    # "z_m": z in metres; caches from before local tiles' feet were converted are not reused
     tag = json.dumps(
-        [args.laz, args.ept, [round(v, 1) for v in aoi_utm]], sort_keys=True
+        [args.laz, args.ept, [round(v, 1) for v in aoi_utm], "z_m"], sort_keys=True
     )
     cache_npz = out / f"lidar_points_{hashlib.md5(tag.encode()).hexdigest()[:10]}.npz"
     if cache_npz.exists() and not args.refresh_lidar:

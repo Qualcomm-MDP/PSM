@@ -3,7 +3,7 @@ import shapely
 import trimesh
 from shapely.geometry import Polygon
 
-from common.MeshUtils import get_base_and_height, get_corners, get_lines
+from common.MeshUtils import MIN_WALL_M, get_base_and_height, get_corners, get_lines
 from common.reporter import Reporter, get_reporter
 
 # Foundation depth below the lowest ground point under a footprint.
@@ -17,6 +17,7 @@ def build_mesh(value, state):
         bbox,
         reporter=get_reporter(state),
         terrain=state.get_metadata("terrain", None),
+        heights=state.get_metadata("lidar_heights", None),
     )
     state.require_metadata("progress_monitor").next()
     return data
@@ -37,7 +38,8 @@ def ground_under(corners, terrain) -> tuple[float, float]:
     ground = terrain.ground(pts[:, 0], pts[:, 1])
     return float(ground.min()), float(ground.max())
 
-def run_extrusion(id, buildings, element, area_bbox, terrain):
+def run_extrusion(id, buildings, element, area_bbox, terrain, measured=None):
+    """measured: a height (m) from the lidar stage, used instead of the tags' height."""
     if len(element.get("geometry") or []) < 3:  # nothing to extrude
         return
     corners = get_corners(element, area_bbox)
@@ -50,6 +52,8 @@ def run_extrusion(id, buildings, element, area_bbox, terrain):
     )
 
     base, top = get_base_and_height(element)
+    if measured is not None:
+        top = max(float(measured), base + MIN_WALL_M)
 
     polys = path.polygons_closed
     if len(polys) == 0 or not polys[0]:  # not a closed shape
@@ -90,9 +94,12 @@ def run_extrusion(id, buildings, element, area_bbox, terrain):
         buildings[id] = mesh
 
 def extrude_buildings(
-    input_data, area_bbox, reporter: Reporter | None = None, terrain=None
+    input_data, area_bbox, reporter: Reporter | None = None, terrain=None, heights=None
 ):
+    """heights (from the lidar stage: "way/<id>", and "relation/<id>/way/<member>" for a
+    relation's member ways) replaces the OSM tag height of the outlines it has."""
     reporter = reporter or get_reporter()
+    heights = heights or {}
     buildings = {}
 
     for _, element in reporter.progress(
@@ -114,10 +121,19 @@ def extrude_buildings(
                     continue
 
         if element["type"] == "way":
-            run_extrusion(id, buildings, element, area_bbox, terrain)
+            run_extrusion(
+                id, buildings, element, area_bbox, terrain, heights.get(f"way/{id}")
+            )
         elif element["type"] == "relation":
             for member in element["members"]:
-                run_extrusion(id, buildings, member, area_bbox, terrain)
+                run_extrusion(
+                    id,
+                    buildings,
+                    member,
+                    area_bbox,
+                    terrain,
+                    heights.get(f"relation/{id}/way/{member.get('ref')}"),
+                )
 
     combined_mesh = trimesh.util.concatenate(
         [building for _, building in buildings.items()]

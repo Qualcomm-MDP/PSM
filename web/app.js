@@ -401,6 +401,9 @@ function segmented(id, onChange) {
 }
 let device = "auto";
 segmented("device", (v) => (device = v));
+// Building heights: "osm" (the default, works anywhere) or "lidar" (USGS 3DEP, US only)
+let heights = "osm";
+segmented("heights", (v) => (heights = v));
 
 // Aerial photos are draped on the terrain, so turning them on turns Terrain on
 // and locks it; turning them off restores whatever Terrain was set to before.
@@ -1243,6 +1246,7 @@ function jobFactsHtml(job) {
   // Jobs from before these options existed don't have them.
   if ("terrain" in o) rows.push(["Terrain", o.terrain ? "On" : "Off"]);
   if ("naip" in o) rows.push(["Aerial photos", o.naip ? "NAIP ground and roofs" : "Off"]);
+  if ("lidar" in o) rows.push(["Building heights", o.lidar ? "USGS LiDAR (OpenStreetMap where it has none)" : "OpenStreetMap"]);
   if ("profile" in o) rows.push(["Profile", o.profile ? "On" : "Off"]);
   if ("evaluate_geometry" in o) rows.push(["LiDAR evaluation", o.evaluate_geometry ? "On" : "Off"]);
   if ("evaluate_texture" in o) rows.push(["Texture evaluation", o.evaluate_texture ? "On" : "Off"]);
@@ -2470,6 +2474,7 @@ $("go").addEventListener("click", async () => {
         device,
         terrain: $("terrain").checked,
         naip: $("naip").checked,
+        lidar: heights === "lidar",
         profile: $("profile").checked,
         evaluate_geometry: $("evaluate").checked,
         evaluate_texture: $("evaluateTexture").checked,

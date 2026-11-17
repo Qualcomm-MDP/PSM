@@ -33,6 +33,7 @@ from evaluation import EVALUATION_DIR, TEXTURE_EVALUATION_DIR
 OPTIONAL_STAGES = {
     "terrain": "terrain",
     "naip": "naip",
+    "lidar": "lidar",
     "evaluate_geometry": "evaluate_geometry",
     "evaluate_texture": "evaluate_texture",
 }
@@ -399,6 +400,7 @@ class JobManager:
                     "seg_device": opts.get("device", "auto"),
                     "use_terrain": opts.get("terrain", False),
                     "use_naip": opts.get("naip", False),
+                    "use_lidar": opts.get("lidar", False),
                     "evaluate_geometry": opts.get("evaluate_geometry", False),
                     "evaluation_dir": str(job_dir / EVALUATION_DIR),
                     "evaluate_texture": opts.get("evaluate_texture", False),
