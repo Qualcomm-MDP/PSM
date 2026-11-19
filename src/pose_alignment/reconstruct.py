@@ -129,6 +129,50 @@ SEED = {"value": 0}
 # come out in a different order each run and the models drift apart (roi_27: identical matches, 4980 vs
 # 4996 points); these steps take seconds per leg. Seeded and single-threaded, two runs agree within ~5 cm
 MAPPER_THREADS = 1
+# COLMAP on a CUDA GPU (--colmap-gpu, or COLMAP_GPU in the environment / .env: auto, on or off): the mappers'
+# bundle adjustment (Ceres' CUDA solvers) and GLOMAP's global positioning. auto: on when the colmap on
+# the PATH was built with GPU support (its "colmap -h" header: "with CUDA" / "with GPU support"). Features
+# and matching are ALIKED in PyTorch (learned_features.py, already on CUDA when there is one); the
+# imported matches' geometric verification is CPU-only in COLMAP, so matches_importer keeps use_gpu 0.
+# Ceres runs small problems on the CPU anyway (BundleAdjustmentCeres.min_num_images_gpu_solver, 50
+# images), and a COLMAP whose Ceres lacks CUDA logs "Falling back to CPU" (colmap() reports it once).
+# Not compared against the CPU solves for determinism (MAPPER_THREADS, SEED).
+GPU = {"on": False, "fallback_noted": False}
+
+
+def colmap_gpu_build():
+    """True when the colmap on the PATH says it was built with GPU (CUDA) support."""
+    try:
+        out = subprocess.run(
+            ["colmap", "-h"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError:
+        return False
+    head = (out.stdout + out.stderr).lower()
+    if "without gpu" in head or "without cuda" in head:
+        return False
+    return "with gpu" in head or "with cuda" in head
+
+
+def set_colmap_gpu(mode):
+    """Resolve --colmap-gpu (auto, on, off) into GPU["on"], with a line saying which."""
+    build = colmap_gpu_build() if mode != "off" else None
+    if mode == "on" and not build:
+        raise SystemExit(
+            "--colmap-gpu on: the colmap on the PATH was built without GPU support "
+            "(colmap -h); use a CUDA build (e.g. the colmap/colmap Docker image) or --colmap-gpu auto"
+        )
+    GPU["on"] = bool(build)
+    print(
+        "COLMAP: GPU bundle adjustment and global positioning on (CUDA build)"
+        if GPU["on"]
+        else f"COLMAP: on the CPU ({'--colmap-gpu off' if mode == 'off' else 'no GPU support in this build'})",
+        flush=True,
+    )
 
 
 def features_label():
@@ -363,6 +407,17 @@ def colmap(log, *args, check=True):
     )
     with open(log, "a") as fh:
         fh.write("\n$ " + " ".join(cmd) + "\n" + result.stdout + result.stderr)
+    if (
+        GPU["on"]
+        and not GPU["fallback_noted"]
+        and "falling back to cpu" in (result.stdout + result.stderr).lower()
+    ):
+        GPU["fallback_noted"] = True
+        print(
+            f"COLMAP: asked for the GPU but {args[0]} fell back to the CPU (its Ceres has no CUDA "
+            f"or cuDSS support); see {log}",
+            flush=True,
+        )
     if check and result.returncode != 0:
         raise RuntimeError(f"COLMAP {args[0]} failed ({result.returncode}); see {log}")
     return result
@@ -804,9 +859,9 @@ def reconstruct_camera(
                 "--GlobalMapper.num_threads",
                 MAPPER_THREADS,
                 "--GlobalMapper.ba_ceres_use_gpu",
-                0,
+                int(GPU["on"]),
                 "--GlobalMapper.gp_use_gpu",
-                0,
+                int(GPU["on"]),
                 "--GlobalMapper.ba_refine_focal_length",
                 int(refine_focal),
                 "--GlobalMapper.ba_refine_extra_params",
@@ -834,6 +889,8 @@ def reconstruct_camera(
                 SEED["value"],
                 "--Mapper.num_threads",
                 MAPPER_THREADS,
+                "--Mapper.ba_use_gpu",
+                int(GPU["on"]),
                 *(["--Mapper.image_list_path", image_list] if image_list else []),
             )
         tick("mapper" if use == mapper else "mapper_fallback", t0)
@@ -861,6 +918,8 @@ def reconstruct_camera(
                 SEED["value"],
                 "--Mapper.num_threads",
                 MAPPER_THREADS,
+                "--Mapper.ba_use_gpu",
+                int(GPU["on"]),
             )
             shutil.rmtree(model)
             retri.rename(model)
@@ -1493,9 +1552,9 @@ def reconstruct_rig(
                 "--GlobalMapper.num_threads",
                 MAPPER_THREADS,
                 "--GlobalMapper.ba_ceres_use_gpu",
-                0,
+                int(GPU["on"]),
                 "--GlobalMapper.gp_use_gpu",
-                0,
+                int(GPU["on"]),
                 "--GlobalMapper.ba_refine_focal_length",
                 int(refine_focal),
                 "--GlobalMapper.ba_refine_extra_params",
@@ -1527,6 +1586,8 @@ def reconstruct_rig(
                 SEED["value"],
                 "--Mapper.num_threads",
                 MAPPER_THREADS,
+                "--Mapper.ba_use_gpu",
+                int(GPU["on"]),
                 *(["--Mapper.image_list_path", rig_list] if rig_list else []),
             )
 
@@ -1603,6 +1664,8 @@ def reconstruct_rig(
                 SEED["value"],
                 "--Mapper.num_threads",
                 MAPPER_THREADS,
+                "--Mapper.ba_use_gpu",
+                int(GPU["on"]),
             )
             shutil.rmtree(model)
             retri.rename(model)
@@ -1827,6 +1890,7 @@ def reconstruct_roi(
         "rig": rig,
         "shared_focal": None,
         "seed": SEED["value"],
+        "colmap_gpu": GPU["on"],
         "match": json.loads(json.dumps(MATCH)),
         "tag": tag,
         "legs": legs,
@@ -2218,8 +2282,16 @@ def main():
         help="Start (or with --fix-focal hold) the focal at this fraction of the image's long side "
         "instead of GeoCalib's, e.g. a camera's value from other reconstructions",
     )
+    parser.add_argument(
+        "--colmap-gpu",
+        choices=["auto", "on", "off"],
+        default=os.environ.get("COLMAP_GPU", "auto"),
+        help="COLMAP's bundle adjustment and global positioning on a CUDA GPU: auto (default, or "
+        "COLMAP_GPU): when colmap was built with GPU support; on: require it; off: CPU",
+    )
     args = parser.parse_args()
     SEED["value"] = args.seed
+    set_colmap_gpu(args.colmap_gpu)
     for m in MATCH.values():
         m.update(
             {

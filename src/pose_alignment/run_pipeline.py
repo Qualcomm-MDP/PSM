@@ -255,6 +255,12 @@ def main():
     )
     g = parser.add_argument_group("reconstruct stage")
     g.add_argument(
+        "--colmap-gpu",
+        choices=["auto", "on", "off"],
+        help="COLMAP's bundle adjustment and global positioning on a CUDA GPU (default: COLMAP_GPU "
+        "or auto, i.e. when colmap was built with GPU support)",
+    )
+    g.add_argument(
         "--fix-intrinsics",
         action="store_true",
         help="Keep the calibration's focal and distortion fixed instead of refining them",
@@ -550,6 +556,7 @@ def main():
             "--calibration",
             args.calibration,
             *tag,
+            *(["--colmap-gpu", args.colmap_gpu] if args.colmap_gpu else []),
             *(["--fix-intrinsics"] if args.fix_intrinsics else []),
             *(["--fix-focal"] if args.fix_focal else []),
             *(["--focal", args.focal] if args.focal else []),

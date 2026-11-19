@@ -485,3 +485,44 @@ def test_measured_gps_breaks_an_along_street_tie():
     # fitting clearly better elsewhere is not a tie
     far = {**chk(fit_off=11.0), "along_best_shift_m": 40.0}
     assert "fits better" in verdict(far, 0.0, [], 2.0)[0]
+
+
+def _colmap_header(monkeypatch, header):
+    import subprocess as sp
+
+    from pose_alignment import reconstruct
+
+    monkeypatch.setattr(
+        reconstruct.subprocess,
+        "run",
+        lambda cmd, **kw: sp.CompletedProcess(cmd, 0, header + "\nUsage:\n", ""),
+    )
+    return reconstruct
+
+
+@pytest.mark.parametrize(
+    ("header", "gpu"),
+    [
+        (
+            "COLMAP 4.2.1 (Commit Unknown on Unknown without GPU support, std hash maps)",
+            False,
+        ),
+        ("COLMAP 4.2.1 (Commit 1a2b3c on 2026-10-01 with GPU support)", True),
+        ("COLMAP 3.9.1 (Commit Unknown on Unknown with CUDA)", True),
+        ("COLMAP 3.9.1 (Commit Unknown on Unknown without CUDA)", False),
+    ],
+)
+def test_colmap_gpu_auto_follows_the_build(monkeypatch, header, gpu):
+    reconstruct = _colmap_header(monkeypatch, header)
+    monkeypatch.setitem(reconstruct.GPU, "on", None)
+    reconstruct.set_colmap_gpu("auto")
+    assert reconstruct.GPU["on"] is gpu
+    reconstruct.set_colmap_gpu("off")
+    assert reconstruct.GPU["on"] is False
+
+
+def test_colmap_gpu_on_needs_a_gpu_build(monkeypatch):
+    reconstruct = _colmap_header(monkeypatch, "COLMAP 4.2.1 (without GPU support)")
+    monkeypatch.setitem(reconstruct.GPU, "on", False)
+    with pytest.raises(SystemExit, match="without GPU support"):
+        reconstruct.set_colmap_gpu("on")
