@@ -51,31 +51,11 @@ class OSMClient:
 
         keys = {k for f in features for k in self._get_tag_filters(f)}
         api_box = (bbox.min_lon, bbox.min_lat, bbox.max_lon, bbox.max_lat)
-        # Overpass is the data service; the main OSM API is meant for editing, so it is only the
-        # fallback (osm_api.py). After Overpass has failed, it is skipped for OVERPASS_DOWN_S, so
-        # an outage costs one round of attempts, not one per job.
-        if time.time() < OSMClient._overpass_down_until:
-            return OsmApiClient().elements(
-                api_box, lambda tags: any(k in tags for k in keys)
-            )
-        query_parts = []
-        for feature in features:
-            query_parts.extend(self.build_feature_query(feature, bbox=bbox))
-        query = f"""
-        [out:json][timeout:25];
-        (
-            {"".join(query_parts)}
-        );
-        out body geom;
-        """
-        try:
-            return self._post(query)
-        except RuntimeError as exc:
-            OSMClient._overpass_down_until = time.time() + OVERPASS_DOWN_S
-            self.reporter.warning(f"{exc}; fetching from the OpenStreetMap API instead")
-            return OsmApiClient().elements(
-                api_box, lambda tags: any(k in tags for k in keys)
-            )
+        
+        OSMClient._overpass_down_until = time.time() + OVERPASS_DOWN_S
+        return OsmApiClient().elements(
+            api_box, lambda tags: any(k in tags for k in keys)
+        )
 
     def _post(self, query: str) -> dict[str, Any]:
         """POST to each Overpass endpoint in turn, retrying with backoff.
