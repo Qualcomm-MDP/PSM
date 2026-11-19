@@ -7,7 +7,9 @@ from common.constants import BoundingBox
 from common.providers import mapillary
 from common.providers.mapillary import MapillaryClient
 
-TILE = BoundingBox(min_lat=37.7843, max_lat=37.7848, min_lon=-122.4082, max_lon=-122.4077)
+TILE = BoundingBox(
+    min_lat=37.7843, max_lat=37.7848, min_lon=-122.4082, max_lon=-122.4077
+)
 
 
 class FakeResponse:
@@ -52,7 +54,9 @@ def test_a_tile_mapillary_fails_on_is_asked_for_in_quarters(monkeypatch, request
     _serve(monkeypatch, requests_seen, answer)
     images = MapillaryClient()._fetch_bbox(TILE, ["id"], 2000)
     assert len(images) == 4
-    assert requests_seen.count(whole) == mapillary.REQUEST_RETRIES  # retried, then split
+    assert (
+        requests_seen.count(whole) == mapillary.REQUEST_RETRIES
+    )  # retried, then split
     assert len(requests_seen) == mapillary.REQUEST_RETRIES + 4
 
 
