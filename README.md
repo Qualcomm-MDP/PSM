@@ -35,8 +35,7 @@ and, for aligned poses, [COLMAP](https://colmap.github.io/install.html) 4.2 or n
 
     - macOS: `brew install colmap`
     - Linux: build it from source ([instructions](https://colmap.github.io/install.html));
-        distribution packages are often older than 4.2. With an NVIDIA GPU, build it with
-        CUDA (or use the `colmap/colmap` Docker image) for GPU bundle adjustment.
+        distribution packages are often older than 4.2.
     - Windows: the release binaries from [GitHub](https://github.com/colmap/colmap/releases)
         (put the folder holding `colmap.exe` on your `PATH`, or `COLMAP_BIN` at `colmap.exe`).
 
@@ -122,10 +121,8 @@ runs on every push, but a full run has not been tried yet.
 **Time and hardware.** A few blocks (300-450 frames) take about 10-15 minutes on an Apple
 silicon laptop, most of it the alignment. The alignment's segmentation, GeoCalib and
 feature matching use the Apple GPU (or an NVIDIA GPU, with CUDA); COLMAP runs on the CPU
-with Homebrew's build. A COLMAP built with CUDA runs its bundle adjustment and global
-positioning on the NVIDIA GPU (`COLMAP_GPU` in `.env`: `auto`, the default, uses the GPU
-whenever `colmap -h` says it was built with GPU support; `on` requires it; `off` keeps the
-CPU). Texturing's obstruction removal uses an NVIDIA GPU if there is one, else the CPU.
+with Homebrew's build, and texturing's obstruction removal uses an NVIDIA GPU if there is
+one, else the CPU.
 
 More on the alignment: [src/pose_alignment/README.md](src/pose_alignment/README.md).
 

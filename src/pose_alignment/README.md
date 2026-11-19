@@ -349,10 +349,7 @@ nearest-neighbour matching under 1 min on a GPU, COLMAP 0.5–1 min, alignment 0
     First runs download the Mask2Former (about 900 MB), GeoCalib, ALIKED and LightGlue
     weights.
 2. COLMAP 4.2 or newer on the PATH (`brew install colmap` on macOS), or `COLMAP_BIN` in
-    `.env` set to its executable. A COLMAP built with CUDA runs the mappers' bundle
-    adjustment and GLOMAP's global positioning on the GPU (`--colmap-gpu auto|on|off`, or
-    `COLMAP_GPU`; auto uses it when `colmap -h` reports GPU support, and `legs.json`
-    records `colmap_gpu`). Homebrew's build has no GPU support.
+    `.env` set to its executable.
 3. A Mapillary client access token from https://www.mapillary.com/dashboard/developers,
     set as `MAPILLARY_TOKEN` (or the main pipeline's `MAPILLARY_ACCESS_TOKEN`). Do not
     commit it.
