@@ -134,6 +134,46 @@ def main():
         "~0.6 m/px). Turns on --terrain. Off by default.",
     )
     parser.add_argument(
+        "--lidar",
+        action="store_true",
+        default=False,
+        help="Building heights from airborne LiDAR (USGS 3DEP, US only) instead of the "
+        "OSM tags; buildings it can't measure keep their OSM height. Off by default.",
+    )
+    parser.add_argument(
+        "--lidar-roof",
+        choices=["main", "top"],
+        default="main",
+        help="With --lidar: main (default) = the largest roof surface (for a pitched roof, "
+        "mid-slope), top = the highest roof surface",
+    )
+    parser.add_argument(
+        "--lidar-max-height",
+        metavar="M",
+        type=float,
+        default=None,
+        help="With --lidar: no building taller than M metres",
+    )
+    parser.add_argument(
+        "--lidar-laz",
+        nargs="+",
+        metavar="FILE",
+        default=None,
+        help="With --lidar: read these LAS/LAZ tiles instead of USGS 3DEP (any country)",
+    )
+    parser.add_argument(
+        "--lidar-laz-crs",
+        metavar="CRS",
+        default=None,
+        help="CRS of the --lidar-laz tiles when their header has none, e.g. EPSG:6497",
+    )
+    parser.add_argument(
+        "--lidar-ept",
+        metavar="URL",
+        default=None,
+        help="With --lidar: this EPT collection (ept.json URL) instead of the newest USGS one",
+    )
+    parser.add_argument(
         "--min-quality",
         metavar="SCORE",
         type=float,
@@ -214,6 +254,14 @@ def main():
             "mapillary_dump_path": args.dump_mapillary,
             "use_terrain": use_terrain,
             "use_naip": args.naip,
+            "use_lidar": args.lidar or bool(args.lidar_laz),
+            "lidar_options": {
+                "roof": args.lidar_roof,
+                "max_height": args.lidar_max_height,
+                "laz": args.lidar_laz,
+                "laz_crs": args.lidar_laz_crs,
+                "ept_url": args.lidar_ept,
+            },
             "min_quality": args.min_quality,
             "pose_source": args.poses,
             "aligned_only": args.aligned_only,

@@ -198,6 +198,16 @@
         <p class="opt-note" id="naipNote" role="status" hidden>
           This area looks outside the continental US, which NAIP covers, so the ground and roofs would stay untextured.
         </p>
+        <div class="opt-row stacked">
+          <div class="text">
+            <strong id="heightsLabel">Building heights</strong>
+            <span id="heightsHint">USGS LiDAR measures each building from airborne laser scans and covers the US only. Outside the US, and for buildings the scans miss, the OpenStreetMap height is used.</span>
+          </div>
+          <div class="segmented" role="group" aria-labelledby="heightsLabel" aria-describedby="heightsHint" id="heights">
+            <button type="button" aria-pressed="true" data-v="osm">OpenStreetMap (default)</button>
+            <button type="button" aria-pressed="false" data-v="lidar">USGS LiDAR · US only</button>
+          </div>
+        </div>
         <div class="opt-row">
           <div class="text">
             <strong id="profileLabel">Profile this run</strong>

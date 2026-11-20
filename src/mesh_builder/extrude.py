@@ -3,7 +3,7 @@ import shapely
 import trimesh
 from shapely.geometry import Polygon
 
-from common.MeshUtils import get_base_and_height, get_corners, get_lines
+from common.MeshUtils import MIN_WALL_M, get_base_and_height, get_corners, get_lines
 from common.reporter import Reporter, get_reporter
 
 # Foundation depth below the lowest ground point under a footprint.
@@ -12,15 +12,13 @@ EMBED_M = 0.1
 
 def build_mesh(value, state):
     bbox = state.require_metadata("bbox")
-    flagged: list[tuple[str, str]] = []
     data = extrude_buildings(
         value["osm"],
         bbox,
         reporter=get_reporter(state),
         terrain=state.get_metadata("terrain", None),
-        flagged=flagged,
+        heights=state.get_metadata("lidar_heights", None),
     )
-    state.set_metadata("flagged_buildings", flagged)
     state.require_metadata("progress_monitor").next()
     return data
 
@@ -41,14 +39,10 @@ def ground_under(corners, terrain) -> tuple[float, float]:
     return float(ground.min()), float(ground.max())
 
 
-def run_extrusion(id, buildings, element, area_bbox, terrain, tags=None) -> str | None:
-    """Extrude one outline (a way, or one outer member of a relation) into buildings[id],
-    added to what that id already has. tags: the height tags to use (a relation's member
-    ways carry none of their own). Returns why the outline was left out, or None."""
-    if "geometry" not in element:
-        return "no outline in data"
-    if len(element["geometry"]) < 3:
-        return "outline has too few points"
+def run_extrusion(id, buildings, element, area_bbox, terrain, measured=None):
+    """measured: a height (m) from the lidar stage, used instead of the tags' height."""
+    if len(element.get("geometry") or []) < 3:  # nothing to extrude
+        return
     corners = get_corners(element, area_bbox)
 
     lines = get_lines(corners)
@@ -58,13 +52,13 @@ def run_extrusion(id, buildings, element, area_bbox, terrain, tags=None) -> str 
         vertices=corners,
     )
 
-    base, top = get_base_and_height(
-        {"tags": element.get("tags", {}) if tags is None else tags}
-    )
+    base, top = get_base_and_height(element)
+    if measured is not None:
+        top = max(float(measured), base + MIN_WALL_M)
 
     polys = path.polygons_closed
-    if len(polys) == 0 or not polys[0]:
-        return "outline is not a valid closed shape"
+    if len(polys) == 0 or not polys[0]:  # not a closed shape
+        return
 
     # Meshes here are z-down (texturing and export flip z). On terrain the
     # roof sits `top` above the highest ground under the footprint and
@@ -99,85 +93,49 @@ def run_extrusion(id, buildings, element, area_bbox, terrain, tags=None) -> str 
         buildings[id] = trimesh.util.concatenate([buildings[id], mesh])
     else:
         buildings[id] = mesh
-    return None
-
-
-def closed_ring(way) -> bool:
-    """A member way that is a whole ring (first node = last node). Rings split over several
-    member ways are left out: get_lines would close each piece into a stray shape."""
-    g = way.get("geometry") or []
-    return len(g) >= 4 and (g[0]["lat"], g[0]["lon"]) == (g[-1]["lat"], g[-1]["lon"])
 
 
 def extrude_buildings(
-    input_data,
-    area_bbox,
-    reporter: Reporter | None = None,
-    terrain=None,
-    flagged: list[tuple[str, str]] | None = None,
+    input_data, area_bbox, reporter: Reporter | None = None, terrain=None, heights=None
 ):
-    """One mesh of every building in input_data (Overpass "out geom" form).
-
-    A way is extruded from its outline. A relation (a multipolygon such as the Duderstadt
-    Center) is extruded member by member: each outer member way that is a closed outline,
-    at the relation's height. Inner members (courtyards) are not cut out yet, and an outer
-    ring split over several member ways is left out. Outer members that are also fetched as
-    buildings of their own are skipped, so they are not built twice.
-
-    Buildings left out are appended to flagged as (osm id, reason) and reported."""
+    """heights (from the lidar stage: "way/<id>", and "relation/<id>/way/<member>" for a
+    relation's member ways) replaces the OSM tag height of the outlines it has."""
     reporter = reporter or get_reporter()
-    flagged = [] if flagged is None else flagged
-    buildings: dict[tuple, trimesh.Trimesh] = {}
-    elements = input_data["elements"]
-    way_ids = {e.get("id") for e in elements if e.get("type") == "way"}
+    heights = heights or {}
+    buildings = {}
 
     for _, element in reporter.progress(
-        enumerate(elements),
+        enumerate(input_data["elements"]),
         desc="Generating Building Mesh(s)",
-        total=len(elements),
+        total=len(input_data["elements"]),
     ):
-        osm = f"{element.get('type')} {element.get('id')}"
-        id = (
-            element.get("type"),
-            element["id"],
-        )  # a way and a relation can share a number
-        if element.get("type") == "relation":
-            outers = [
-                m
-                for m in element.get("members", [])
-                if m.get("type", "way") == "way"
-                and m.get("role", "outer") != "inner"
-                and m.get("ref") not in way_ids
-            ]
-            reasons = [
-                (
-                    run_extrusion(
-                        id,
-                        buildings,
-                        m,
-                        area_bbox,
-                        terrain,
-                        tags=element.get("tags", {}),
-                    )
-                    if closed_ring(m)
-                    else "outline is split over several ways (not built yet)"
-                )
-                for m in outers
-            ]
-            if id not in buildings:
-                flagged.append(
-                    (osm, next((r for r in reasons if r), "no outer outline in data"))
-                )
-            continue
-        reason = run_extrusion(id, buildings, element, area_bbox, terrain)
-        if reason:
-            flagged.append((osm, reason))
+        id = element["id"]
 
-    if flagged:
-        details = "\n".join(f"  {osm}: {reason}" for osm, reason in flagged)
-        reporter.warning(
-            f"{len(flagged)} building(s) were left out of the mesh:\n{details}"
-        )
+        # some buildings like the Dude are not represented as a "way" type, they are represented as a "relation" type, so it was failing the first check
+        # I have split up the checks, but now need to handle the extrusion different since the types store things differently
+        if element["type"] == "way":
+            if "geometry" not in element:
+                continue
+
+        if element["type"] == "relation":
+            for member in element["members"]:
+                if "geometry" not in member:
+                    continue
+
+        if element["type"] == "way":
+            run_extrusion(
+                id, buildings, element, area_bbox, terrain, heights.get(f"way/{id}")
+            )
+        elif element["type"] == "relation":
+            for member in element["members"]:
+                run_extrusion(
+                    id,
+                    buildings,
+                    member,
+                    area_bbox,
+                    terrain,
+                    heights.get(f"relation/{id}/way/{member.get('ref')}"),
+                )
 
     combined_mesh = trimesh.util.concatenate(
         [building for _, building in buildings.items()]

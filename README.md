@@ -80,7 +80,22 @@ and, for aligned poses, [COLMAP](https://colmap.github.io/install.html) 4.2 or n
     | `--no-seg`                                          | no obstruction removal at all                                                          |
     | `--texture best`                                    | each face from its single best photo, instead of blending every photo that sees a wall |
     | `--terrain`, `--naip`                               | real ground heights; NAIP aerial photos on the ground and roofs                        |
+    | `--lidar`                                           | building heights from USGS 3DEP airborne LiDAR (US); OSM heights where it has none     |
+    | `--lidar-laz FILE ...`                              | the same from your own LAS/LAZ tiles (any country; feet are converted to metres)       |
     | `--alignment-dir outputs/alignment/mapillary_roi_N` | reuse an earlier alignment instead of running it again                                 |
+
+**LiDAR heights.** With `--lidar` (web app: **Building heights → USGS LiDAR**) each building's
+height is measured from the LiDAR points on its roof: the main roof surface, not the highest
+point, so trees, antennas and noise don't raise it; from the highest ground along the outline,
+as the mesh stands the roof there; and never more than a mapped `height` + 50% (at least 6 m)
+or `building:levels` x 5 m + 6 m; when the LiDAR comes out more than 30% (at least 6 m)
+below a mapped `height` (towers: few points on a small top), the mapped height is kept.
+Buildings OSM tags as towers (`building=tower`, `man_made=tower`, `tower:type`) take their
+highest points instead of the main roof. `--lidar-roof top` takes the highest roof surface instead,
+`--lidar-max-height M` caps every building. Buildings the LiDAR doesn't cover (outside the US,
+built after the flight, raised parts) keep their OSM height. Needs `poetry install --with eval`
+(laspy). Tiles are cached in `~/.cache/lidar_eval` (`LIDAR_CACHE_DIR`), shared with the
+geometry evaluation. Details: [src/lidar/lidar.py](src/lidar/lidar.py).
 
 **What a run does.** It fetches the OSM buildings and the Mapillary photos around the box,
 then picks the captures to use: along each OSM street, the densest run that covers it (a
