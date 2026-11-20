@@ -51,7 +51,7 @@ class OSMClient:
 
         keys = {k for f in features for k in self._get_tag_filters(f)}
         api_box = (bbox.min_lon, bbox.min_lat, bbox.max_lon, bbox.max_lat)
-        
+
         OSMClient._overpass_down_until = time.time() + OVERPASS_DOWN_S
         return OsmApiClient().elements(
             api_box, lambda tags: any(k in tags for k in keys)
