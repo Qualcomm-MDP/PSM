@@ -11,7 +11,7 @@ def clip_confidence_score(confidence_raw, threshold=0.4, sharpen=1):
     """Alpha (uint8) from a confidence in [0, 1]: OPAQUE above threshold, else SEE_THROUGH.
     confidence_raw may already be raised to the power sharpen (blend's view weights are), so it
     is compared with threshold ** sharpen."""
-    confidence = np.asarray(confidence_raw, dtype=np.float64)
+    confidence = np.asarray(confidence_raw * 255, dtype=np.float64)
     return np.where(confidence > threshold**sharpen, OPAQUE, SEE_THROUGH).astype(
         np.uint8
     )

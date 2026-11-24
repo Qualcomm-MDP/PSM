@@ -214,8 +214,7 @@ def bake_walls(
                 wfill[int(fi)] += w * (filled[fv, fu] / 255.0).astype(np.float32)
             confidence = clip_confidence_score(w, sharpen=SHARPEN)
 
-            # Keep the highest confidence observation for each texel
-            confidence_map[int(fi)] = np.maximum(confidence_map[int(fi)], confidence)
+            confidence_map[int(fi)] += confidence * w
 
     patches, seen, total = [], 0, 0
     for fi, a in acc.items():
@@ -225,6 +224,7 @@ def bake_walls(
         tex[has] = np.clip(a[has] / ws[has][:, None], 0, 255).astype(np.uint8)
         # a texel is photo texture when photos saw it and less than half its weight came
         # from pixels obstruction removal painted over
+        confidence_map[fi][has] /= ws[has]
         valid = has & (wfill[fi] < 0.5 * ws)
         tex = cv2.cvtColor(tex, cv2.COLOR_BGR2RGB)
         face_confidence = confidence_map[int(fi)].astype(np.uint8)
