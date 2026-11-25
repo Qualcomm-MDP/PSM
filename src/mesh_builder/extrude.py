@@ -102,7 +102,7 @@ def extrude_buildings(
     relation's member ways) replaces the OSM tag height of the outlines it has."""
     reporter = reporter or get_reporter()
     heights = heights or {}
-    buildings = {}
+    buildings: dict[int, trimesh.Trimesh] = {}
 
     for _, element in reporter.progress(
         enumerate(input_data["elements"]),
