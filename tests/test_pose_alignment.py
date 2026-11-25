@@ -338,6 +338,20 @@ def test_aligned_360_frames_are_textured_from_the_taller_view(tmp_path):
     assert forward[1] == pytest.approx(math.cos(math.radians(12.5)), abs=1e-6)
 
 
+def test_views_of_one_360_photo_are_textured_together():
+    """Aligned views come per camera folder (all right views, then all left ones); texturing
+    releases a downloaded photo after its last view in a row, so they must be regrouped."""
+    from texturing.tex_projection import group_by_source
+
+    plan = [
+        (f"{pid}_{cam}", {}, {"id": pid}, pid, "where", False)
+        for cam in ("cam0", "cam1")
+        for pid in ("111", "222")
+    ] + [("333", {}, None, "333", "where", False)]
+    order = [entry[0] for entry in group_by_source(plan)]
+    assert order == ["111_cam0", "111_cam1", "222_cam0", "222_cam1", "333"]
+
+
 def _street(cross_every=(25.0, 40.0, 30.0, 45.0, 35.0)):
     """Walls of a straight street running north (x = -10 and x = +10, y 0..200) broken by cross
     streets at irregular spacing (cross walls at each gap); points on the walls every 0.5 m."""

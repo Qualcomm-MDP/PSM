@@ -128,6 +128,18 @@ def _build_K(focal_px: float, w: int, h: int) -> np.ndarray:
     )
 
 
+def group_by_source(plan: list[tuple]) -> list[tuple]:
+    """The texturing plan (img_id, meta, crop, source_id, where, stored) with the views of one
+    source photo next to each other, in order of each source's first view. A source is fetched
+    once and released after its last view in a row: the fetch stage lists a 360 photo's right
+    and left views together, but the alignment lists its views per camera folder (all right
+    views, then all left ones), so a left view would otherwise find its 360 photo released."""
+    first: dict[str, int] = {}
+    for k, entry in enumerate(plan):
+        first.setdefault(entry[3], k)
+    return sorted(plan, key=lambda entry: first[entry[3]])
+
+
 def _build_R(meta: dict) -> np.ndarray:
     rotvec = meta.get("rotvec")
     if rotvec is not None:
@@ -352,6 +364,7 @@ def _apply_textures(
         )
         where = str(image_store.path(source_id)) if stored else meta["image_url"]
         plan.append((img_id, meta, crop, source_id, where, stored))
+    plan = group_by_source(plan)
     sources = list(dict.fromkeys((sid, where) for _, _, _, sid, where, _ in plan))
     order = {sid: k for k, (sid, _) in enumerate(sources)}
     fetches: dict = {}
