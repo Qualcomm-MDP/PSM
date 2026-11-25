@@ -124,6 +124,39 @@ def image_lonlat(img):
     return geom["coordinates"]
 
 
+def capture_order(imgs):
+    """One sequence's records in capture order: by time, and frames sharing a timestamp by
+    their position along the direction of travel there (from the frames before and after).
+    Some cameras stamp several frames with the same time: Rochester's GoPro Max 360 runs
+    have about three per second on one timestamp, and sorted by time alone they came out
+    shuffled, every few frames a step back, so the alignment's fold check rejected a leg
+    whose cameras sat 0.6 m from their walls (Exchange Boulevard, roi_19 leg03)."""
+    imgs = sorted(imgs, key=lambda i: i["captured_at"])
+    if len(imgs) < 2:
+        return imgs
+    frame = LocalFrame(*image_lonlat(imgs[0]))
+    xy = np.array([frame.xy(*image_lonlat(i)) for i in imgs])
+    groups, start = [], 0
+    for k in range(1, len(imgs) + 1):
+        if k == len(imgs) or imgs[k]["captured_at"] != imgs[start]["captured_at"]:
+            groups.append(list(range(start, k)))
+            start = k
+    out = []
+    for g, members in enumerate(groups):
+        if len(members) > 1:
+            before = xy[groups[g - 1]].mean(axis=0) if g else xy[members].mean(axis=0)
+            after = (
+                xy[groups[g + 1]].mean(axis=0)
+                if g + 1 < len(groups)
+                else xy[members].mean(axis=0)
+            )
+            d = after - before
+            if np.linalg.norm(d) > 1e-6:
+                members = sorted(members, key=lambda k: float(xy[k] @ d))
+        out += [imgs[k] for k in members]
+    return out
+
+
 def tiles_along(segs, frame, tile, pad):
     """Lon/lat boxes of about tile x tile metres (plus pad) covering every line segment."""
     boxes = set()
@@ -292,7 +325,7 @@ def find_runs(
         by_seq.setdefault(images[img_id]["sequence"], []).append(images[img_id])
     runs = []
     for seq_id, imgs in by_seq.items():
-        imgs.sort(key=lambda i: i["captured_at"])
+        imgs = capture_order(imgs)
         for run in continuous_runs(imgs, frame, min_spacing, max_gap_s, max_jump):
             inside = [k for k, i in enumerate(run) if dist[i["id"]] <= corridor]
             if inside:
@@ -311,6 +344,19 @@ def find_runs(
 def spacing_bucket(run):
     """Median spacing rounded down to whole metres; single-frame runs sort last."""
     return math.floor(run["spacing_m"]) if math.isfinite(run["spacing_m"]) else math.inf
+
+
+# A 360 run needs fewer frames along a straight stretch than a perspective camera's: each
+# frame gives two views (right and left), both facing the facades. Rochester's short downtown
+# streets (77-131 m) had 360 runs of 15-19 straight frames and none of 20.
+PANO_MIN_IMAGES = 15
+
+
+def enough_frames(run, min_images):
+    """The run has enough frames along a straight stretch: min_images, PANO_MIN_IMAGES (at
+    most min_images) for a 360 run."""
+    need = min(min_images, PANO_MIN_IMAGES) if run["pano"] else min_images
+    return run["straight"] >= need
 
 
 def view_rank(run, side_deg=45.0):
@@ -354,7 +400,7 @@ def rank_runs(
     return sorted(
         runs,
         key=lambda r: (
-            r["straight"] < min_images,
+            not enough_frames(r, min_images),
             r["spacing_m"] > max_spacing,
             pano == "prefer" and not r["pano"],
             -min(int(r["coverage"] * 4), 3),
@@ -387,7 +433,7 @@ def choose_runs(
     the ranking breaks ties). A further run needs min_images frames along a straight stretch,
     a median spacing of at most max_spacing, and to cover at least min_new of the line and
     min_new_m metres not covered yet, so where one capture ends another takes over."""
-    if not ranked or ranked[0]["straight"] < min_images:
+    if not ranked or not enough_frames(ranked[0], min_images):
         return []
     picks = [ranked[0]]
     done = covered(ranked[0], frame, samples, reach)
@@ -399,7 +445,7 @@ def choose_runs(
     while True:
         best = None
         for k, r in enumerate(ranked):
-            if any(r is q for q in picks) or r["straight"] < min_images:
+            if any(r is q for q in picks) or not enough_frames(r, min_images):
                 continue
             if r["spacing_m"] > max_spacing:
                 continue
@@ -421,7 +467,7 @@ def print_runs(ranked, min_images, limit=10):
         f"\n  {'sequence':<24} {'images':>6} {'straight':>8} {'covers':>6} {'spacing m':>9} {'view':>6}  {'date':<10}  camera"
     )
     for r in ranked[:limit]:
-        flag = "" if r["straight"] >= min_images else "  (too few straight frames)"
+        flag = "" if enough_frames(r, min_images) else "  (too few straight frames)"
         view = "?" if r["view_deg"] is None else f"{r['view_deg']:+.0f}"
         print(
             f"  {r['sequence']:<24} {r['images']:>6} {r['straight']:>8} {100 * r['coverage']:>5.0f}% {r['spacing_m']:>9.1f} {view:>6}  "
@@ -722,7 +768,8 @@ def choose_roi(
             picks = picks[:1]
         if not picks:
             print(
-                f"  no run with {min_images}+ frames along a straight stretch on line {k}; skipping it "
+                f"  no run with {min_images}+ frames ({min(min_images, PANO_MIN_IMAGES)}+ for a 360 run) "
+                f"along a straight stretch on line {k}; skipping it "
                 "(lower --min-images, widen the corridor or draw another street)"
             )
             continue
@@ -768,7 +815,7 @@ def _joined(a, b, records, min_spacing=1.0):
     for img in records.values():
         if img.get("sequence") == seq and t0 <= img.get("captured_at", -1) <= t1:
             pool.setdefault(img["id"], img)
-    ordered = sorted(pool.values(), key=lambda i: i["captured_at"])
+    ordered = capture_order(pool.values())
     frame = LocalFrame(*image_lonlat(ordered[0]))
     kept, last = [], None
     for img in ordered:

@@ -138,6 +138,39 @@ def test_chooser_adds_a_run_where_the_best_one_ends():
     )
 
 
+def test_frames_sharing_a_timestamp_are_ordered_along_the_way():
+    from data_ingest.mapillary_sequences import capture_order
+
+    # driving east 3 m per frame, three frames per timestamp, listed in a shuffled order
+    recs = [_record(k, LON0 + 3 * k * M_LON) for k in range(12)]
+    for r in recs:
+        r["captured_at"] = 1_700_000_000_000 + 1000 * (int(r["id"]) - 1000) // 3
+    shuffled = [recs[k] for k in (2, 0, 1, 5, 3, 4, 8, 7, 6, 11, 9, 10)]
+    assert [r["id"] for r in capture_order(shuffled)] == [r["id"] for r in recs]
+    # driving west the same frames come out the other way within each timestamp
+    west = [_record(k, LON0 - 3 * k * M_LON) for k in range(6)]
+    for r in west:
+        r["captured_at"] = 1_700_000_000_000 + 1000 * (int(r["id"]) - 1000) // 3
+    assert [r["id"] for r in capture_order(west[::-1])] == [r["id"] for r in west]
+
+
+def test_a_360_run_needs_fewer_straight_frames():
+    from data_ingest.mapillary_sequences import choose_roi
+
+    roi = make_roi("test", [_line(0, 90)], 15.0)
+    # 17 frames 5 m apart: too few for a phone, enough for a 360 camera
+    phone = [_record(k, LON0 + 5 * k * M_LON, seq="seqPHONE000") for k in range(17)]
+    assert choose_roi(roi, phone, no_rig=True)["groups"] == []
+    pano = [
+        {**r, "sequence": "seqPANO0000", "camera_type": "spherical"}
+        for r in [_record(50 + k, LON0 + 5 * k * M_LON) for k in range(17)]
+    ]
+    picks = [
+        g["pick"]["sequence"] for g in choose_roi(roi, pano, no_rig=True)["groups"]
+    ]
+    assert picks == ["seqPANO0000"]
+
+
 def test_ingest_textures_only_the_chosen_runs(monkeypatch):
     from pose_alignment import streets_from_bbox
 

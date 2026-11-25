@@ -821,7 +821,7 @@ def gps_check(p, leg):
                 for n in cam.get("frame_files", [])
                 if n in meta and meta[n].get("captured_at_ms")
             ),
-            key=lambda m: m["captured_at_ms"],
+            key=lambda m: (m["captured_at_ms"], m.get("file", "")),
         )
         if len(fr) < 3:
             continue

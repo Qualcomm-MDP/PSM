@@ -192,7 +192,9 @@ def plan_legs(p, sequences, frames, settings):
         seqs = [s for s in sequences if s["line"] == line]
         primary = next(s for s in seqs if s["role"] == "primary")
         pf = sorted(
-            frames[primary["folder"]].values(), key=lambda f: f["captured_at_ms"]
+            frames[primary["folder"]].values(),
+            # frames sharing a timestamp: in file order (the download's capture order)
+            key=lambda f: (f["captured_at_ms"], f.get("file", "")),
         )
         frame = LocalFrame(pf[0]["lon"], pf[0]["lat"])
         chunks = []
@@ -1102,7 +1104,7 @@ def rig_pairs(members, p, overlap=10):
     seqs, pairs = [], set()
     for cam, names, _ in members:
         meta = p.frames(cam["folder"])
-        order = sorted(names, key=lambda f: meta[f]["captured_at_ms"])
+        order = sorted(names, key=lambda f: (meta[f]["captured_at_ms"], f))
         seqs.append((cam, [(meta[f]["captured_at_ms"], names[f]) for f in order]))
         for i, (_, a) in enumerate(seqs[-1][1]):
             pairs.update((a, b) for _, b in seqs[-1][1][i + 1 : i + 1 + overlap])
