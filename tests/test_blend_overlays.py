@@ -88,6 +88,58 @@ class _Transformer:
         return np.asarray(lon) * 1000.0, np.asarray(lat) * 1000.0
 
 
+def _flat_cams(tmp_path, specs):
+    """Photos of one colour each, cameras looking north at the wall: specs (colour BGR,
+    x, distance south of the wall, aligned)."""
+    K = np.array([[200.0, 0, 200], [0, 200.0, 150], [0, 0, 1]])
+    cams = []
+    for k, (colour, x, back, aligned) in enumerate(specs):
+        cv2.imwrite(
+            str(tmp_path / f"c{k}.png"), np.full((300, 400, 3), colour, np.uint8)
+        )
+        cams.append(
+            {
+                "img_path": tmp_path / f"c{k}.png",
+                "w": 400,
+                "h": 300,
+                "K": K,
+                "R": LOOK_NORTH,
+                "Cw": np.array([x, 10.0 - back, 1.5]),
+                "mask": None,
+                "aligned": aligned,
+            }
+        )
+    return cams
+
+
+def test_aligned_photos_outweigh_closer_ones_with_mapillary_poses(tmp_path):
+    # the Mapillary-posed photo (red) is closer than the aligned one (green): the aligned wins
+    cams = _flat_cams(
+        tmp_path, [((0, 0, 255), 2.0, 8.0, False), ((0, 255, 0), 2.0, 12.0, True)]
+    )
+    patches, _ = bake_walls(*_wall(), cams, set(), _Quiet())
+    for p in patches:
+        g = p["patch"][..., 1][p["valid"]]
+        r = p["patch"][..., 0][p["valid"]]
+        assert g.mean() > 240 and r.mean() < 15
+    # where no aligned photo sees the wall, the Mapillary-posed one still textures it
+    patches, stats = bake_walls(*_wall(), cams[:1], set(), _Quiet())
+    assert stats["coverage"] > 0.99
+    assert all(p["patch"][..., 0][p["valid"]].mean() > 240 for p in patches)
+
+
+def test_only_the_best_views_are_blended(tmp_path):
+    from texturing.blend import TOP_K
+
+    # TOP_K close photos (white) and one far one (black): the far one adds nothing
+    near = [((255, 255, 255), 2.0, 6.0 + 0.1 * k, True) for k in range(TOP_K)]
+    cams = _flat_cams(tmp_path, near + [((0, 0, 0), 2.0, 9.0, True)])
+    patches, _ = bake_walls(*_wall(), cams, set(), _Quiet())
+    for p in patches:
+        # (blending every photo, the black one would bring these texels down to ~227)
+        assert p["patch"][..., :3][p["valid"]].min() >= 250
+
+
 def test_overlays_are_in_the_models_frame():
     poses = {
         "1": {

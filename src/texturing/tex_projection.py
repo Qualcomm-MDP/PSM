@@ -548,6 +548,8 @@ def _apply_textures(
                 # an aligned camera's height is above the road under it, so on terrain
                 # it goes on top of the ground there, like the default height
                 "Cw": camera_position(x, y, terrain, meta.get("camera_height_m")),
+                # placed by the pose alignment (blend prefers these to Mapillary's poses)
+                "aligned": meta.get("pose_source") == "colmap",
             }
         )
 
