@@ -380,7 +380,14 @@ def _apply_textures(
                     reused["photos"] += 1
             if crop:
                 pano = (source_id, img)
-                img = crop_view(img, crop["yaw_deg"], crop["fov_deg"], crop["size"])
+                img = crop_view(
+                    img,
+                    crop["yaw_deg"],
+                    crop["fov_deg"],
+                    crop["size"],
+                    crop.get("pitch_deg", 0.0),
+                    crop.get("height"),
+                )
                 raw = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 95])[
                     1
                 ].tobytes()
@@ -400,7 +407,17 @@ def _apply_textures(
         if remove_obs:
             labels = None
             if cached_labels is not None and seg_labels is not None:
-                seg = seg_labels.get(str(img_id), img.shape[:2])
+                seg = seg_labels.get(str(img_id))
+                # only a class map of this very view: an aligned 360 photo is textured from a
+                # taller view than the square one the alignment segmented
+                if (
+                    seg is not None
+                    and abs(seg.shape[0] / seg.shape[1] - img.shape[0] / img.shape[1])
+                    > 0.01
+                ):
+                    seg = None
+                if seg is not None and seg.shape != img.shape[:2]:
+                    seg = seg_labels.get(str(img_id), img.shape[:2])
                 if seg is not None:
                     labels = (seg, cached_labels)
                     reused["class maps"] += 1
