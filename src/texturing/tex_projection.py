@@ -128,6 +128,18 @@ def _build_K(focal_px: float, w: int, h: int) -> np.ndarray:
     )
 
 
+def group_by_source(plan: list[tuple]) -> list[tuple]:
+    """The texturing plan (img_id, meta, crop, source_id, where, stored) with the views of one
+    source photo next to each other, in order of each source's first view. A source is fetched
+    once and released after its last view in a row: the fetch stage lists a 360 photo's right
+    and left views together, but the alignment lists its views per camera folder (all right
+    views, then all left ones), so a left view would otherwise find its 360 photo released."""
+    first: dict[str, int] = {}
+    for k, entry in enumerate(plan):
+        first.setdefault(entry[3], k)
+    return sorted(plan, key=lambda entry: first[entry[3]])
+
+
 def _build_R(meta: dict) -> np.ndarray:
     rotvec = meta.get("rotvec")
     if rotvec is not None:
@@ -352,6 +364,7 @@ def _apply_textures(
         )
         where = str(image_store.path(source_id)) if stored else meta["image_url"]
         plan.append((img_id, meta, crop, source_id, where, stored))
+    plan = group_by_source(plan)
     sources = list(dict.fromkeys((sid, where) for _, _, _, sid, where, _ in plan))
     order = {sid: k for k, (sid, _) in enumerate(sources)}
     fetches: dict = {}
@@ -380,7 +393,14 @@ def _apply_textures(
                     reused["photos"] += 1
             if crop:
                 pano = (source_id, img)
-                img = crop_view(img, crop["yaw_deg"], crop["fov_deg"], crop["size"])
+                img = crop_view(
+                    img,
+                    crop["yaw_deg"],
+                    crop["fov_deg"],
+                    crop["size"],
+                    crop.get("pitch_deg", 0.0),
+                    crop.get("height"),
+                )
                 raw = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 95])[
                     1
                 ].tobytes()
@@ -400,7 +420,17 @@ def _apply_textures(
         if remove_obs:
             labels = None
             if cached_labels is not None and seg_labels is not None:
-                seg = seg_labels.get(str(img_id), img.shape[:2])
+                seg = seg_labels.get(str(img_id))
+                # only a class map of this very view: an aligned 360 photo is textured from a
+                # taller view than the square one the alignment segmented
+                if (
+                    seg is not None
+                    and abs(seg.shape[0] / seg.shape[1] - img.shape[0] / img.shape[1])
+                    > 0.01
+                ):
+                    seg = None
+                if seg is not None and seg.shape != img.shape[:2]:
+                    seg = seg_labels.get(str(img_id), img.shape[:2])
                 if seg is not None:
                     labels = (seg, cached_labels)
                     reused["class maps"] += 1
@@ -518,6 +548,8 @@ def _apply_textures(
                 # an aligned camera's height is above the road under it, so on terrain
                 # it goes on top of the ground there, like the default height
                 "Cw": camera_position(x, y, terrain, meta.get("camera_height_m")),
+                # placed by the pose alignment (blend prefers these to Mapillary's poses)
+                "aligned": meta.get("pose_source") == "colmap",
             }
         )
 

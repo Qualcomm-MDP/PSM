@@ -477,3 +477,37 @@ def test_the_stage_does_nothing_when_off():
     state = PipelineState(initial_input=None, current_value=None, metadata={})
     assert evaluate_geometry_stage("mesh", state) == "mesh"
     assert state.get_metadata("geometry_evaluation", None) is None
+
+
+def test_local_tiles_in_feet_are_read_in_metres(tmp_path):
+    """State Plane LAZ tiles in feet: heights must come out in metres, not 3.28x."""
+    laspy = pytest.importorskip("laspy")
+    from pyproj import CRS, Transformer
+
+    utm = CRS.from_epsg(32617)
+    x0, y0 = 277_000.0, 4_684_000.0  # Ann Arbor, UTM 17N
+    ux, uy = np.meshgrid(np.arange(x0, x0 + 20), np.arange(y0, y0 + 20))
+    ux, uy = ux.ravel(), uy.ravel()
+    z_m = np.where(ux < x0 + 10, 250.0, 262.0)  # ground, and a roof 12 m above it
+
+    def write(crs, metres_per_unit, name):
+        fx, fy = Transformer.from_crs(utm, crs, always_xy=True).transform(ux, uy)
+        header = laspy.LasHeader(point_format=6, version="1.4")
+        header.add_crs(crs)
+        header.scales = [0.001, 0.001, 0.001]
+        header.offsets = [float(np.min(fx)), float(np.min(fy)), 0.0]
+        las = laspy.LasData(header)
+        las.x, las.y, las.z = fx, fy, z_m / metres_per_unit
+        las.classification = np.full(len(ux), 2, dtype=np.uint8)
+        las.write(tmp_path / name)
+        return str(tmp_path / name)
+
+    aoi = (x0 - 1, y0 - 1, x0 + 21, y0 + 21)
+    for path in (
+        write(CRS.from_epsg(2253), 0.3048, "feet.laz"),  # Michigan South (ft)
+        write(utm, 1.0, "metres.laz"),
+    ):
+        x, y, z, c, _ = ev.read_laz_files([path], aoi, utm)
+        assert len(z) == len(z_m)
+        assert z.max() - z.min() == pytest.approx(12.0, abs=0.01)
+        assert z.min() == pytest.approx(250.0, abs=0.01)

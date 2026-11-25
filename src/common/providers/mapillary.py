@@ -21,6 +21,21 @@ FETCH_WORKERS = 8
 SPLIT_FRACTION = 0.5
 MAX_SPLIT_DEPTH = 4
 REQUEST_RETRIES = 3
+# A tile Mapillary keeps failing on with a server error (5xx, 429) or a timeout is split into
+# quarters, at most this many times (50 m -> 12.5 m): in very dense areas (downtown San Francisco)
+# a single 50 m tile with its ~20 fields is more than the server answers. Client errors (a bad
+# token: 401/403) fail at once.
+ERROR_SPLIT_DEPTH = 2
+
+
+def _server_side(exc: requests.exceptions.RequestException) -> bool:
+    """Whether a failed request is Mapillary's trouble (worth retrying or asking for less)."""
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        return resp.status_code >= 500 or resp.status_code == 429
+    return isinstance(
+        exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)
+    )
 
 
 class MapillaryClient:
@@ -48,17 +63,29 @@ class MapillaryClient:
             "limit": limit,
         }
 
+        error = None
         for attempt in range(REQUEST_RETRIES):
             try:
                 resp = requests.get(MAPILLARY_URL, params=params, timeout=60)
                 resp.raise_for_status()
+                error = None
                 break
             except requests.exceptions.RequestException as e:
-                if attempt == REQUEST_RETRIES - 1:
-                    # The request URL carries the token; keep it out of the
-                    # message and drop the original exception.
-                    raise RuntimeError(f"API Request Error: {redact(str(e))}") from None
-                time.sleep(2**attempt)
+                # The request URL carries the token; keep it out of the
+                # message and drop the original exception.
+                error = f"API Request Error: {redact(str(e))}"
+                if not _server_side(e):
+                    raise RuntimeError(error) from None
+                if attempt < REQUEST_RETRIES - 1:
+                    time.sleep(2**attempt)
+        if error is not None:
+            if depth >= ERROR_SPLIT_DEPTH:
+                raise RuntimeError(error) from None
+            self.reporter.info(
+                f"  Mapillary failed on {bbox.to_str()} ({error[:80]}...); "
+                "asking for its quarters instead"
+            )
+            return self._split(bbox, fields, limit, depth)
 
         data = resp.json().get("data", [])
 
@@ -70,7 +97,12 @@ class MapillaryClient:
                     f"{bbox.to_str()} even after splitting; some images may be missing."
                 )
             return {img["id"]: img for img in data}
+        return self._split(bbox, fields, limit, depth)
 
+    def _split(
+        self, bbox: BoundingBox, fields: list[str], limit: int, depth: int
+    ) -> dict[str, dict]:
+        """The images of bbox, asked for in four quarters."""
         mid_lat = (bbox.min_lat + bbox.max_lat) / 2
         mid_lon = (bbox.min_lon + bbox.max_lon) / 2
         images: dict[str, dict] = {}

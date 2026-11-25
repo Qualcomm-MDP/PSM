@@ -205,6 +205,7 @@ def test_real_pipeline_stages_drive_the_timeline():
         "fetch",
         "align_poses",
         "terrain",
+        "lidar",
         "build_mesh",
         "naip",
         "texturing",
@@ -983,3 +984,25 @@ def test_delete_photos_default_can_be_saved(tmp_path):
         "/api/settings", json={"defaults": {"delete_photos": True}}
     ).json()
     assert saved["defaults"]["delete_photos"] is True
+
+
+@pytest.mark.parametrize("lidar", [False, True])
+def test_lidar_option(tmp_path, lidar):
+    seen = {}
+
+    def record(value, state):
+        seen["use_lidar"] = state.get_metadata("use_lidar", None)
+        return {"osm": {"elements": []}, "mapillary": {}}
+
+    def factory():
+        pipeline = PipelineChain("optional")
+        pipeline.add_stage("fetch", record, label="Fetch data")
+        pipeline.add_stage("lidar", lambda value, state: value, label="LiDAR heights")
+        return pipeline
+
+    client = make_client(tmp_path, factory)
+    created = client.post("/api/jobs", json={"bbox": BBOX, "lidar": lidar}).json()
+    assert created["options"]["lidar"] is lidar
+    job = wait_for(client, created["id"])
+    assert job["status"] == "done" and seen["use_lidar"] is lidar
+    assert job["stages"]["lidar"] == ("done" if lidar else "skipped")

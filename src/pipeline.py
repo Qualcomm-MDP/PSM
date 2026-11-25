@@ -21,6 +21,7 @@ from evaluation import (
     evaluate_geometry_stage,
     evaluate_texture_stage,
 )
+from lidar import lidar_stage
 from mesh_builder.extrude import build_mesh
 from naip import naip_stage
 from pose_alignment.align_poses import align_poses
@@ -136,6 +137,12 @@ def build_pipeline() -> PipelineChain:
         terrain_stage,
         label="Terrain",
         detail="Ground heights (when enabled)",
+    )
+    pipeline.add_stage(
+        "lidar",
+        lidar_stage,
+        label="LiDAR heights",
+        detail="Building heights from USGS 3DEP LiDAR (when enabled)",
     )
     pipeline.add_stage(
         "build_mesh", build_mesh, label="Build mesh", detail="Extrude footprints"

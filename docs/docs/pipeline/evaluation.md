@@ -105,7 +105,7 @@ poetry run python scripts/eval/eval_geometry_lidar.py output/jobs/<job id>
 poetry run python scripts/eval/eval_geometry_lidar.py model.glb --bbox W S E N   # a .glb from src/main.py
 ```
 
-`--help` lists the tolerances, the roof method and local LiDAR (`--laz`). Downloaded LiDAR tiles are cached in `$LIDAR_CACHE_DIR` (in Docker, `/cache/lidar` in the model-cache volume), else `~/.cache/lidar_eval`.
+`--help` lists the tolerances, the roof method and local LiDAR (`--laz`). Local tiles in feet (State Plane, for example) are converted to metres from the unit in their header. Downloaded LiDAR tiles are cached in `$LIDAR_CACHE_DIR` (in Docker, `/cache/lidar` in the model-cache volume), else `~/.cache/lidar_eval`.
 
 When it can't run (no USGS LiDAR covers the area, laspy is missing, or there's no internet), the pipeline stage records why and the job still finishes with its model.
 

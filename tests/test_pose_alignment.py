@@ -1,6 +1,7 @@
 """Pose alignment logic that runs without COLMAP, GeoCalib or LightGlue."""
 
 import json
+import math
 import sqlite3
 from pathlib import Path
 
@@ -189,7 +190,7 @@ def test_apply_alignment_skips_unreliable_and_off_street_legs(tmp_path):
 
 
 def test_pano_views_turn_a_360_photo_into_right_and_left_views():
-    from data_ingest.pano import crop_rotvec, pano_views
+    from data_ingest.pano import crop_rotvec, pano_views, texture_view
 
     # a 360 sequence driving east; the image centre looks along travel
     records = [
@@ -220,12 +221,14 @@ def test_pano_views_turn_a_360_photo_into_right_and_left_views():
     right, left = out["1_right"], out["1_left"]
     assert right["pano_crop"]["yaw_deg"] == pytest.approx(90.0, abs=1)
     assert left["pano_crop"]["yaw_deg"] == pytest.approx(-90.0, abs=1)
-    assert (
-        right["original_width"] == right["original_height"] == 1440
-    )  # 5760 * 90 / 360
+    assert right["original_width"] == 1440  # 5760 * 90 / 360
+    # texturing's view: 45 deg below the horizon to 70 deg above, tilted up 12.5 deg
+    pitch, height = texture_view(1440)
+    assert pitch == 12.5 and right["original_height"] == height
+    assert height == pytest.approx(2 * 720 * math.tan(math.radians(57.5)), abs=2)
     assert right["focal_length_pixels"] == pytest.approx(720.0)  # 90 deg across
     np.testing.assert_allclose(
-        right["rotvec"], crop_rotvec(rot, right["pano_crop"]["yaw_deg"])
+        right["rotvec"], crop_rotvec(rot, right["pano_crop"]["yaw_deg"], 12.5)
     )
 
 
@@ -238,6 +241,115 @@ def test_crop_view_looks_where_its_yaw_says():
     centre = lambda yaw: int(crop_view(pano, yaw, 90.0, 100)[50, 50, 0])  # noqa: E731
     assert abs(centre(90.0) - 150) <= 1  # +90 deg: column 600, three quarters across
     assert abs(centre(-90.0) - 50) <= 1  # -90 deg: column 200, one quarter across
+
+
+def _lonlat_pano(H=360, W=720):
+    """A float equirectangular image whose channels are each pixel's column and row."""
+    rows, cols = np.mgrid[0:H, 0:W].astype(np.float32)
+    return np.dstack([cols, rows, np.zeros_like(rows)])
+
+
+def test_texture_view_reaches_70_deg_up_and_45_down():
+    from data_ingest.pano import crop_view, texture_view
+
+    pano = _lonlat_pano()
+    pitch, height = texture_view(200)
+    view = crop_view(pano, 90.0, 90.0, 200, pitch, height)
+    assert view.shape[:2] == (height, 200)
+    lat = lambda row: 90.0 - (row + 0.5) * 180 / 360  # noqa: E731  degrees, from a pano row
+    top, bottom = view[0, 100], view[-1, 100]
+    assert lat(top[1]) == pytest.approx(70.0, abs=1.0)
+    assert lat(bottom[1]) == pytest.approx(-45.0, abs=1.0)
+    assert (top[0] + 0.5) / 720 * 360 - 180 == pytest.approx(
+        90.0, abs=1.0
+    )  # still +90 deg
+
+
+def test_a_tilted_view_projects_where_it_was_cut():
+    """Texturing projects a world point with the view's rotation and focal (pinhole, principal
+    point at the centre); crop_view must have sampled the 360 photo in that direction there."""
+    from scipy.spatial.transform import Rotation
+
+    from data_ingest.pano import crop_rotvec, crop_view
+
+    pano = _lonlat_pano()
+    rot = [0.2, -0.9, 0.3]  # the 360 photo's world-to-camera rotation
+    yaw, pitch, w, h = -90.0, 12.5, 300, 470
+    f = w / 2 / math.tan(math.radians(45))
+    view = crop_view(pano, yaw, 90.0, w, pitch, h)
+    R_view = Rotation.from_rotvec(crop_rotvec(rot, yaw, pitch)).as_matrix()
+    R_pano = Rotation.from_rotvec(rot).as_matrix()
+    for d in ([0.3, -0.8, 0.9], [0.1, 0.4, 0.2], [-0.5, 0.2, 1.4]):
+        c = R_view @ np.asarray(d)
+        if c[2] <= 0:
+            continue
+        u, v = f * c[0] / c[2] + w / 2 - 0.5, f * c[1] / c[2] + h / 2 - 0.5
+        if not (0 <= u < w - 1 and 0 <= v < h - 1):
+            continue
+        q = R_pano @ np.asarray(
+            d
+        )  # the direction in the 360 camera (x right, y down, z centre)
+        lon, lat = math.atan2(q[0], q[2]), math.atan2(-q[1], math.hypot(q[0], q[2]))
+        col, row = (
+            (lon / (2 * math.pi) + 0.5) * 720 - 0.5,
+            (0.5 - lat / math.pi) * 360 - 0.5,
+        )
+        got = view[int(round(v)), int(round(u))]
+        assert got[0] == pytest.approx(col, abs=2.5) and got[1] == pytest.approx(
+            row, abs=2.5
+        )
+
+
+def test_aligned_360_frames_are_textured_from_the_taller_view(tmp_path):
+    from scipy.spatial.transform import Rotation
+
+    crop = {"intrinsics": {"model": "RADIAL", "width": 960, "height": 960, "fx": 480.0}}
+    paths = _roi(
+        tmp_path,
+        {
+            "line2_cam0_pppppppp": [
+                _camera("222", "frame_0001.jpg", -83.7395, pano_yaw_deg=90.0, **crop)
+            ],
+        },
+    )
+    paths.originals.mkdir(parents=True)
+    (paths.originals / "222.jpg").write_bytes(b"360 photo")
+    mapillary = {
+        "222_right": {
+            "latitude": 42.2801,
+            "longitude": -83.7395,
+            "original_width": 1440,
+            "original_height": 2260,
+            "pano_crop": {"id": "222", "side": "right"},
+        }
+    }
+    _apply_alignment(paths, mapillary)
+    assert "222_right" not in mapillary  # Mapillary's view of it replaced
+    view = mapillary["222_line2_cam0_pppppppp"]
+    assert view["image_url"] == str(paths.originals / "222.jpg")
+    assert (
+        view["pano_crop"]["yaw_deg"] == 90.0 and view["pano_crop"]["pitch_deg"] == 12.5
+    )
+    assert view["original_width"] == 960 and view["original_height"] > 1400
+    assert "camera_model" not in view  # an exact pinhole: nothing to undistort
+    # the square crop looked north, level; the view looks 12.5 deg up from there
+    forward = Rotation.from_rotvec(view["rotvec"]).as_matrix()[2]
+    assert forward[2] == pytest.approx(math.sin(math.radians(12.5)), abs=1e-6)
+    assert forward[1] == pytest.approx(math.cos(math.radians(12.5)), abs=1e-6)
+
+
+def test_views_of_one_360_photo_are_textured_together():
+    """Aligned views come per camera folder (all right views, then all left ones); texturing
+    releases a downloaded photo after its last view in a row, so they must be regrouped."""
+    from texturing.tex_projection import group_by_source
+
+    plan = [
+        (f"{pid}_{cam}", {}, {"id": pid}, pid, "where", False)
+        for cam in ("cam0", "cam1")
+        for pid in ("111", "222")
+    ] + [("333", {}, None, "333", "where", False)]
+    order = [entry[0] for entry in group_by_source(plan)]
+    assert order == ["111_cam0", "111_cam1", "222_cam0", "222_cam1", "333"]
 
 
 def _street(cross_every=(25.0, 40.0, 30.0, 45.0, 35.0)):

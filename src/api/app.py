@@ -130,6 +130,8 @@ class JobRequest(BaseModel):
     # Same as the CLI's --terrain and --naip; aerial photos need the terrain.
     terrain: bool = False
     naip: bool = False
+    # Same as the CLI's --lidar: building heights from USGS 3DEP LiDAR (US only)
+    lidar: bool = False
     # Same as the CLI's --profile: per-stage time and memory in profile.json.
     profile: bool = False
     # Same as the CLI's --evaluate-geometry: compare the model with USGS LiDAR (US only)
@@ -329,6 +331,7 @@ def create_app(
                 "device": req.device,
                 "terrain": req.terrain or req.naip,
                 "naip": req.naip,
+                "lidar": req.lidar,
                 "profile": req.profile,
                 "evaluate_geometry": req.evaluate_geometry,
                 "evaluate_texture": req.evaluate_texture,

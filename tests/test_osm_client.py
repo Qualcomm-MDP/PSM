@@ -60,13 +60,14 @@ def _api(monkeypatch):
     return asked
 
 
-def test_fetch_asks_overpass_first(fake_post, monkeypatch):
+def test_fetch_uses_the_osm_api(fake_post, monkeypatch):
+    # the buildings come from the main OpenStreetMap API; Overpass is not asked (d7265a6)
     calls, responses = fake_post
     responses += [FakeResponse(200, {"elements": ["from overpass"]})]
     asked = _api(monkeypatch)
 
-    assert make_client().fetch(BBOX) == {"elements": ["from overpass"]}
-    assert calls == ["https://a"] and asked == []
+    assert make_client().fetch(BBOX) == {"elements": ["from the api"]}
+    assert calls == [] and len(asked) == 1
 
 
 def test_fetch_falls_back_to_the_osm_api_and_skips_overpass_while_down(

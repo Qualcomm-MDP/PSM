@@ -213,6 +213,47 @@ def _off_street_legs(paths, cameras, max_off_street_m, extend_m=50.0):
     return {leg: d for leg, d in worst.items() if d > max_off_street_m}
 
 
+def _pano_texture_view(paths, cam, pose):
+    """Metadata for texturing an aligned view of a 360 photo with texturing's taller view
+    (data_ingest.pano.TEXTURE_VIEW) instead of the alignment's square one: the same camera
+    centre and yaw in the 360 photo, tilted up, cut from the stored full-resolution 360 photo.
+    None when that photo is not stored (the square view is used then)."""
+    from data_ingest.pano import PANO_FOV_DEG, crop_axes, texture_view
+
+    original = ImageStore(paths.originals).path(str(cam["id"]))
+    if not original.exists():
+        return None
+    width = cam["intrinsics"]["width"]
+    pitch, height = texture_view(width, PANO_FOV_DEG)
+    R_wc = crop_axes(0.0, pitch).T @ np.array(cam["rotation_cam_to_enu"]).T
+    rotvec = Rotation.from_matrix(R_wc).as_rotvec()
+    yaw, pitch_w, roll = Rotation.from_rotvec(rotvec).as_euler("ZYX", degrees=True)
+    view = {
+        k: v
+        for k, v in pose.items()
+        if k not in ("camera_model", "camera_params", "camera_width")
+    }
+    return {
+        **view,
+        "rotvec": rotvec.tolist(),
+        "yaw": round(float(yaw), 2),
+        "pitch": round(float(pitch_w), 2),
+        "roll": round(float(roll), 2),
+        "focal_length_pixels": width / 2 / math.tan(math.radians(PANO_FOV_DEG) / 2),
+        "original_width": width,
+        "original_height": height,
+        "image_url": str(original),
+        "pano_crop": {
+            "id": str(cam["id"]),
+            "yaw_deg": cam["pano_yaw_deg"],
+            "pitch_deg": pitch,
+            "fov_deg": PANO_FOV_DEG,
+            "size": width,
+            "height": height,
+        },
+    }
+
+
 def _apply_alignment(
     paths, mapillary, aligned_only=False, max_off_street_m=15.0, reporter=None
 ):
@@ -277,6 +318,17 @@ def _apply_alignment(
         info["camera_height_m"] = round(cam["height_m"], 3)
 
         meta = mapillary.get(img_id)
+        tall = (
+            _pano_texture_view(paths, cam, pose)
+            if meta is None and cam.get("pano_yaw_deg") is not None
+            else None
+        )
+        if tall is not None:
+            mapillary[img_id] = tall
+            images[img_id] = {"source": "colmap (added, taller 360 view)", **info}
+            counts["added"] += 1
+            aligned_panos.add(str(cam["id"]))
+            continue
         if meta is None:
             mapillary[img_id] = {
                 **pose,
@@ -316,6 +368,7 @@ def _apply_alignment(
         k
         for k, m in mapillary.items()
         if (m.get("pano_crop") or {}).get("id") in aligned_panos
+        and m.get("pose_source") != "colmap"
     ]:
         del mapillary[img_id]
         images[img_id] = {

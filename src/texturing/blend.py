@@ -2,12 +2,18 @@
 
 Each wall triangle is baked on a grid of TEXEL_M texels laid out in world coordinates
 (along the wall and up), so the triangles of one wall sample the same points and meet
-without a seam. Every texel takes a weighted average over the photos that see it:
+without a seam. Every texel takes a weighted average over the TOP_K best photos that see it:
 
     weight = (cos(view angle) x unobstructed / (1 + distance / 15 m)) ** SHARPEN
+             x (1 for a pose from the pose alignment, else MAPILLARY_POSE_WEIGHT)
 
-so the most square-on, closest, unobstructed view dominates and the others soften the
-seams between photos. A photo counts for a wall only within REACH_M, in front of it, and
+so the most square-on, closest, unobstructed view dominates and the next best soften the
+seams between photos. Only the best TOP_K: averaging every photo that sees a texel (dozens
+along a street of 360 frames a metre apart) stacked their small pose errors into offset
+copies of the windows and floor lines, worst up the facade. Photos with Mapillary's poses
+(captures the alignment did not reconstruct) count only where no aligned photo sees the texel
+nearly as well: mixed with aligned ones, their few-metre errors ghosted the same way
+(Rochester's downtown: 68 of the 94 photos of one building). A photo counts for a wall only within REACH_M, in front of it, and
 where no other building's wall crosses the line of sight (a plan-view test per texel
 column). Obstructions (segmentation masks, when they are kept rather than painted over)
 get no weight. Texels no photo sees stay untextured.
@@ -26,6 +32,10 @@ TEXEL_M = 0.1  # metres per texel
 MAX_TEXELS = 1024  # longest patch side; larger faces get coarser texels
 REACH_M = 60.0  # a photo paints walls within this distance
 SHARPEN = 8  # weight exponent: the best view dominates, its neighbours soften seams
+TOP_K = 3  # photos blended per texel: the best ones
+MAPILLARY_POSE_WEIGHT = (
+    0.01  # a photo with Mapillary's pose, against one the alignment placed
+)
 MAX_IMAGE_SIDE = 2048  # photos are read at most this large for baking
 VERTICAL_NZ = 0.2  # |normal z| below this: a wall
 
@@ -98,7 +108,8 @@ def bake_walls(
     """Patches (texturing's patch records: fi, patch RGB, pw, ph, v0_px..v2_px, valid) of
     every wall triangle a photo sees, and stats. cam_data: texturing's cameras (img_path,
     w, h, K, R world-to-camera, Cw, mask: a small obstruction mask or None, filled: a
-    small mask of what obstruction removal painted over, or None). A patch's "valid"
+    small mask of what obstruction removal painted over, or None, aligned: the pose is
+    the pose alignment's, not Mapillary's). A patch's "valid"
     marks the texels that hold photo texture: seen by a photo, and mostly not painted
     over (the texture evaluation's M_res)."""
     frames, A, B = _wall_frames(verts_proj, faces, normals, skip)
@@ -107,10 +118,12 @@ def bake_walls(
     fis = np.array(list(frames))
     centres = np.array([frames[f]["centre"] for f in fis])
     outward = np.array([frames[f]["n"] for f in fis])
-    acc: dict[int, np.ndarray] = {}
-    wsum: dict[int, np.ndarray] = {}
-    wfill: dict[int, np.ndarray] = {}  # weight of painted-over (inpainted) pixels
-    confidence_map: dict[int, np.ndarray] = {}
+    # per wall triangle, its texels' TOP_K best views: weight, colour (BGR), the share
+    # obstruction removal painted over (0-255) and the view's confidence alpha
+    top_w: dict[int, np.ndarray] = {}
+    top_col: dict[int, np.ndarray] = {}
+    top_fill: dict[int, np.ndarray] = {}
+    top_conf: dict[int, np.ndarray] = {}
     lo_ab, hi_ab = np.minimum(A, B), np.maximum(A, B)
 
     for cd in reporter.progress(cam_data, desc="Blending photos onto walls"):
@@ -138,6 +151,7 @@ def bake_walls(
         R = np.asarray(cd["R"], float)
         mask = cd.get("mask")
         filled = cd.get("filled")
+        pose_weight = 1.0 if cd.get("aligned") else MAPILLARY_POSE_WEIGHT
         for fi in fis[near]:
             fr = frames[int(fi)]
             colxy, z = fr["colxy"], fr["z"]
@@ -187,47 +201,65 @@ def bake_walls(
                 clear = 1.0 - mask[mv, mu] / 255.0
             # median_dist = np.median(rn)
             # w = 1 - (0.35 * clear) - (0.25 * cos) - (0.40 * (1 - np.exp(-rn / median_dist)))
-            w = ((cos * clear / (1.0 + rn / 15.0)) ** SHARPEN * ok).astype(np.float32)
-            if not w.any():
+            view = ((cos * clear / (1.0 + rn / 15.0)) ** SHARPEN * ok).astype(
+                np.float32
+            )
+            if not view.any():
                 continue
+            w = view * np.float32(pose_weight)
+            fi_ = int(fi)
+            if fi_ not in top_w:
+                top_w[fi_] = np.zeros((H, W, TOP_K), np.float32)
+                top_col[fi_] = np.zeros((H, W, TOP_K, 3), np.uint8)
+                top_fill[fi_] = np.zeros((H, W, TOP_K), np.uint8)
+                top_conf[fi_] = np.zeros((H, W, TOP_K), np.uint8)
+            # this view replaces a texel's weakest kept view where it is better
+            weakest = top_w[fi_].argmin(axis=2)
+            rows, cols = np.nonzero(
+                w > np.take_along_axis(top_w[fi_], weakest[..., None], 2)[..., 0]
+            )
+            if not len(rows):
+                continue
+            slot = weakest[rows, cols]
             col = cv2.remap(
                 img, u.astype(np.float32), v.astype(np.float32), cv2.INTER_LINEAR
-            ).astype(np.float32)
-            if int(fi) not in acc:
-                acc[int(fi)] = np.zeros((H, W, 3), np.float32)
-                wsum[int(fi)] = np.zeros((H, W), np.float32)
-                confidence_map[int(fi)] = np.zeros((H, W), np.float32)
-                wfill[int(fi)] = np.zeros((H, W), np.float32)
-            acc[int(fi)] += col * w[..., None]
-            wsum[int(fi)] += w
+            )
+            top_w[fi_][rows, cols, slot] = w[rows, cols]
+            top_col[fi_][rows, cols, slot] = col[rows, cols]
             if filled is not None:
                 fu = np.clip(
-                    (u * filled.shape[1] / img.shape[1]).astype(int),
+                    (u[rows, cols] * filled.shape[1] / img.shape[1]).astype(int),
                     0,
                     filled.shape[1] - 1,
                 )
                 fv = np.clip(
-                    (v * filled.shape[0] / img.shape[0]).astype(int),
+                    (v[rows, cols] * filled.shape[0] / img.shape[0]).astype(int),
                     0,
                     filled.shape[0] - 1,
                 )
-                wfill[int(fi)] += w * (filled[fv, fu] / 255.0).astype(np.float32)
-            confidence = clip_confidence_score(w, sharpen=SHARPEN)
-
-            # Keep the highest confidence observation for each texel
-            confidence_map[int(fi)] = np.maximum(confidence_map[int(fi)], confidence)
+                top_fill[fi_][rows, cols, slot] = filled[fv, fu]
+            else:
+                top_fill[fi_][rows, cols, slot] = 0
+            # the alpha from the view itself, whoever's pose it has
+            top_conf[fi_][rows, cols, slot] = clip_confidence_score(
+                view[rows, cols], sharpen=SHARPEN
+            )
 
     patches, seen, total = [], 0, 0
-    for fi, a in acc.items():
-        fr, ws = frames[fi], wsum[fi]
+    for fi, tw in top_w.items():
+        fr, ws = frames[fi], tw.sum(axis=2)
         has = ws > 1e-30
+        a = np.einsum("hwk,hwkc->hwc", tw, top_col[fi].astype(np.float32))
         tex = np.full(a.shape, grey, np.uint8)
         tex[has] = np.clip(a[has] / ws[has][:, None], 0, 255).astype(np.uint8)
         # a texel is photo texture when photos saw it and less than half its weight came
         # from pixels obstruction removal painted over
-        valid = has & (wfill[fi] < 0.5 * ws)
+        wfill = (tw * (top_fill[fi] / 255.0)).sum(axis=2)
+        confidence = (tw * top_conf[fi]).sum(axis=2)
+        confidence[has] /= ws[has]
+        valid = has & (wfill < 0.5 * ws)
         tex = cv2.cvtColor(tex, cv2.COLOR_BGR2RGB)
-        face_confidence = confidence_map[int(fi)].astype(np.uint8)
+        face_confidence = confidence.astype(np.uint8)
         tex_rgba = np.dstack((tex, face_confidence))
         seen += int(has.sum())
         total += has.size
